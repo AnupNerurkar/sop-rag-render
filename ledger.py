@@ -82,6 +82,15 @@ def get_connection():
     else:
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
+        # Every ledger call opens and closes its own connection, and FastAPI
+        # runs `def` endpoints in a threadpool, so concurrent writers are real.
+        # SQLite's default busy timeout is zero — it raises "database is locked"
+        # immediately instead of waiting. WAL additionally keeps readers from
+        # blocking the writer. busy_timeout is per-connection, so it has to be
+        # set here on every connect, not once at setup.
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA synchronous=NORMAL")
         return conn
 
 def _ensure_column(cursor, table: str, column: str, definition: str) -> None:

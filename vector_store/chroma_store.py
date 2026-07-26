@@ -71,14 +71,31 @@ def get_chroma_store():
         is_postgres_db = db_url.startswith("postgresql://") or db_url.startswith("postgres://")
         chroma_host = os.getenv("CHROMA_SERVER_HOST")
 
-        if backend in ("supabase", "pgvector") or (is_postgres_db and not chroma_host):
+        # Ordered so an explicit VECTOR_STORE_BACKEND always wins, and the
+        # fallback is SQLite rather than Chroma — chromadb isn't in
+        # requirements.txt, so falling through to ChromaStore raises
+        # ImportError at initialize() rather than degrading.
+        if backend in ("supabase", "pgvector"):
             from vector_store.pgvector_store import PGVectorStore
-            logger.info("[VECTOR_STORE] Instantiating PGVectorStore (Supabase pgvector backend)")
+            logger.info("[VECTOR_STORE] Instantiating PGVectorStore (pgvector backend, explicit)")
             _vector_store_instance = PGVectorStore()
-        else:
+        elif backend == "sqlite":
+            from vector_store.sqlite_store import SQLiteVectorStore
+            logger.info("[VECTOR_STORE] Instantiating SQLiteVectorStore (local SQLite backend, explicit)")
+            _vector_store_instance = SQLiteVectorStore()
+        elif backend == "chroma" or chroma_host:
             logger.info("[VECTOR_STORE] Instantiating ChromaStore (ChromaDB backend)")
             _vector_store_instance = ChromaStore()
-            
+        elif is_postgres_db:
+            from vector_store.pgvector_store import PGVectorStore
+            logger.info("[VECTOR_STORE] Instantiating PGVectorStore (inferred from Postgres DATABASE_URL)")
+            _vector_store_instance = PGVectorStore()
+        else:
+            from vector_store.sqlite_store import SQLiteVectorStore
+            logger.info("[VECTOR_STORE] Instantiating SQLiteVectorStore (default)")
+            _vector_store_instance = SQLiteVectorStore()
+
+
         _vector_store_instance.initialize()
     return _vector_store_instance
 

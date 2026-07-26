@@ -1,17 +1,38 @@
 import os
 from datetime import datetime
 
-from sqlalchemy import Boolean, Column, DateTime, Integer, String, Text, create_engine
+from sqlalchemy import Boolean, Column, DateTime, Integer, String, Text, create_engine, event
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./institutional.db")
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
-if DATABASE_URL.startswith("sqlite"):
+IS_SQLITE = DATABASE_URL.startswith("sqlite")
+
+if IS_SQLITE:
     engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 else:
     engine = create_engine(DATABASE_URL)
+
+if IS_SQLITE:
+    @event.listens_for(engine, "connect")
+    def _sqlite_pragmas(dbapi_conn, _connection_record):
+        """
+        FastAPI serves `def` endpoints from a threadpool, so this engine has
+        concurrent writers. SQLite's default busy timeout is zero, which turns
+        ordinary contention into "database is locked" 500s. WAL also lets
+        readers proceed while a write is in flight. journal_mode persists with
+        the file, but busy_timeout is per-connection and must be set on each.
+        Mirrors the PRAGMAs in ledger.get_connection().
+        """
+        cursor = dbapi_conn.cursor()
+        try:
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA busy_timeout=5000")
+            cursor.execute("PRAGMA synchronous=NORMAL")
+        finally:
+            cursor.close()
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
