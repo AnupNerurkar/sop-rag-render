@@ -134,14 +134,23 @@ def search(
     if not match_expr:
         return []
 
+    # title comes from a correlated scalar subquery, not a JOIN to
+    # `documents` -- `documents` has its own access_level/department/
+    # category/version/doc_id columns mirroring `chunks`, so joining it
+    # made every bare column name in where_sql ambiguous (filters.py emits
+    # unqualified names like "access_level = ?", which is exactly what the
+    # comment in sqlite_store.py's query_with_filter warns about). The
+    # subquery keeps `chunks` (aliased c) as the only table in scope for
+    # the WHERE clause, so those bare names resolve without qualification.
     sql = """
         SELECT c.chunk_id, c.content, bm25(chunks_fts) AS rank,
-               c.doc_id, d.title, c.category, c.department, c.access_level,
+               c.doc_id,
+               (SELECT title FROM documents WHERE doc_id = c.doc_id) AS title,
+               c.category, c.department, c.access_level,
                c.version, c.section_heading, c.chunk_index, c.total_chunks,
                c.source_file
         FROM chunks_fts
         JOIN chunks c ON c.chunk_id = chunks_fts.chunk_id
-        LEFT JOIN documents d ON d.doc_id = c.doc_id
         WHERE chunks_fts MATCH ?
     """
     params: list = [match_expr]

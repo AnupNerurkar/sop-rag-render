@@ -125,8 +125,16 @@ class PipelineConfig(BaseModel):
         description="Enable BM25 keyword retrieval alongside dense retrieval.",
     )
     use_reranker: bool = Field(
-        default=False,
-        description="Enable cross-encoder reranking of fused candidates.",
+        default=True,
+        description=(
+            "Rerank fused candidates via one extra Groq listwise call. "
+            "Was False when this meant a local cross-encoder that was never "
+            "actually installed (see retrieval/reranker.py) -- every query "
+            "silently returned unreranked results while claiming otherwise. "
+            "Now real: measured nDCG@5 0.681->0.728 and Hit@3 0.95->1.00 on "
+            "the eval corpus for ~80ms added latency (eval-results/"
+            "phase3-retrieval.json vs baseline-retrieval.json)."
+        ),
     )
 
     # ---- Prompt ------------------------------------------------------------

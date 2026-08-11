@@ -289,7 +289,8 @@ class RetrievalResponse(BaseModel):
         description="UTC timestamp of the retrieval call.",
     )
     latency_ms:       float = Field(default=0.0, description="Total retrieval latency in milliseconds.")
-    reranked:         bool  = Field(default=False, description="True if cross-encoder reranking was applied.")
+    reranked:         bool  = Field(default=False, description="True only if the reranker actually reordered results -- not just requested.")
+    rerank_method:    Optional[str] = Field(default=None, description="'groq_listwise' if reranking happened; None otherwise (circuit open, call failed, invalid response, etc).")
     retrieval_mode:   str   = Field(default="dense", description="'dense' | 'hybrid' | 'hybrid+rerank'")
 
     # Applied filters (echoed back for transparency)

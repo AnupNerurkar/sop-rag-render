@@ -19,7 +19,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from retrieval.hybrid_search import RawSearchResult, BM25SearchBackend, DenseSearchBackend
 from retrieval.fusion import RecipRankFusion, RRF_K
 from retrieval.fts5 import _sanitize_query, ensure_schema, search as fts5_search
-from retrieval.reranker import CrossEncoderReranker, RERANKER_MODEL
+from retrieval.reranker import get_reranker
+from retrieval.rerank_client import GroqListwiseReranker, CIRCUIT_FAILURE_THRESHOLD
 from retrieval.retrieval_schema import (
     RetrievalQuery,
     DEFAULT_TOP_K_DENSE,
@@ -90,8 +91,17 @@ class TestFTS5Search:
         db_path = tmp_path / "test.db"
         c = sqlite3.connect(str(db_path))
         c.row_factory = sqlite3.Row
+        # documents mirrors the real ledger schema's overlapping column
+        # names (access_level/department/category/version/doc_id also
+        # exist on `chunks`) on purpose -- and is seeded with DIFFERENT
+        # values than the matching chunks row, so a query that accidentally
+        # resolves a bare column name against `documents` instead of
+        # `chunks` fails loudly instead of coincidentally passing.
         c.execute("""
-            CREATE TABLE documents (doc_id TEXT PRIMARY KEY, title TEXT)
+            CREATE TABLE documents (
+                doc_id TEXT PRIMARY KEY, title TEXT, category TEXT,
+                department TEXT, access_level TEXT, version TEXT
+            )
         """)
         c.execute("""
             CREATE TABLE chunks (
@@ -110,7 +120,9 @@ class TestFTS5Search:
         ]
         for chunk_id, doc_id, content, dept, level in rows:
             c.execute(
-                "INSERT OR IGNORE INTO documents VALUES (?, ?)",
+                "INSERT OR IGNORE INTO documents "
+                "(doc_id, title, category, department, access_level, version) "
+                "VALUES (?, ?, 'WRONG_CATEGORY', 'WRONG_DEPT', 'WRONG_LEVEL', 'WRONG_VERSION')",
                 (doc_id, f"Doc {doc_id}"),
             )
             c.execute(
@@ -160,6 +172,22 @@ class TestFTS5Search:
         # never joined to `documents`; this is the fix.
         results = fts5_search(conn, "admission fee", "", [], 5)
         assert any(meta["title"] == "Doc d1" for _, _, _, meta in results)
+
+    def test_title_lookup_and_where_filter_together_do_not_ambiguate(self, conn):
+        # Regression: an earlier version JOINed `documents` (for title) in
+        # the same query that applies the RBAC where-clause. `documents`
+        # has its own access_level/department/category/version columns
+        # mirroring `chunks`, so a bare "access_level = ?" from
+        # filters.py became ambiguous -- SQLite raised "ambiguous column
+        # name" and the query fell back to dense-only, silently. The
+        # fixture seeds `documents` with WRONG_* values specifically so
+        # this test fails loudly instead of passing by coincidence if the
+        # ambiguity is ever reintroduced.
+        results = fts5_search(conn, "admission fee", "access_level = ?", ["Public"], 5)
+        assert len(results) > 0
+        for _, _, _, meta in results:
+            assert meta["access_level"] == "Public"
+            assert meta["title"].startswith("Doc ")
 
     def test_query_syntax_characters_do_not_crash_search(self, conn):
         # End-to-end version of the sanitizer test: these used to raise
@@ -278,34 +306,103 @@ class TestRecipRankFusion:
 
 
 # ===========================================================================
-# CrossEncoderReranker — unit tests (no model load)
+# GroqListwiseReranker — unit tests (no network; _call_groq is monkeypatched)
 # ===========================================================================
 
-class TestCrossEncoderRerankerUnit:
-    def test_not_loaded_initially(self):
-        r = CrossEncoderReranker()
-        assert not r.is_loaded
+def _pool(n: int) -> list[RawSearchResult]:
+    return [
+        RawSearchResult(chunk_id=f"c{i}", content=f"content {i}", score=1.0 - i * 0.1, distance=None)
+        for i in range(n)
+    ]
 
-    def test_model_name(self):
-        r = CrossEncoderReranker()
-        assert r.model_name == RERANKER_MODEL
 
-    def test_rerank_raises_when_not_loaded(self):
-        r = CrossEncoderReranker()
-        with pytest.raises(RuntimeError, match="not loaded"):
-            r.rerank("query", [], 5)
+class TestGroqListwiseRerankerUnit:
+    def test_empty_candidates_returns_empty_not_reranked(self):
+        r = GroqListwiseReranker()
+        results, reranked = r.rerank("query", [], 5)
+        assert results == []
+        assert reranked is False
 
-    def test_rerank_empty_candidates_returns_empty(self):
-        r = CrossEncoderReranker.__new__(CrossEncoderReranker)
-        r._model_name = RERANKER_MODEL
-        r._model      = object()  # fake loaded model marker
-        # Don't call load() — just check empty input handling
-        r._model      = None       # reset
-        r._model_name = RERANKER_MODEL
+    def test_successful_rerank_reorders_and_reports_true(self, monkeypatch):
+        r = GroqListwiseReranker()
+        pool = _pool(4)
+        # Reverse order: least relevant (by original score) ranked first.
+        monkeypatch.setattr(r, "_call_groq", lambda query, pool: [3, 2, 1, 0])
+        results, reranked = r.rerank("query", pool, top_k=4)
+        assert reranked is True
+        assert [x.chunk_id for x in results] == ["c3", "c2", "c1", "c0"]
 
-    def test_custom_model_name(self):
-        r = CrossEncoderReranker(model_name="custom/model")
-        assert r.model_name == "custom/model"
+    def test_rerank_score_stays_none(self, monkeypatch):
+        # A listwise reranker yields an order, not a numeric score --
+        # synthesizing one would corrupt confidence and threshold filtering
+        # downstream, so rerank_score is never set here.
+        r = GroqListwiseReranker()
+        pool = _pool(3)
+        monkeypatch.setattr(r, "_call_groq", lambda query, pool: [0, 1, 2])
+        results, reranked = r.rerank("query", pool, top_k=3)
+        assert reranked is True
+        assert all(x.rerank_score is None for x in results)
+
+    def test_invalid_permutation_falls_back(self, monkeypatch):
+        r = GroqListwiseReranker()
+        pool = _pool(4)
+        monkeypatch.setattr(r, "_call_groq", lambda query, pool: [0, 0, 1, 2])  # duplicate, missing 3
+        results, reranked = r.rerank("query", pool, top_k=4)
+        assert reranked is False
+        assert [x.chunk_id for x in results] == [c.chunk_id for c in pool]
+
+    def test_call_failure_falls_back(self, monkeypatch):
+        r = GroqListwiseReranker()
+        pool = _pool(3)
+
+        def _raise(query, pool):
+            raise RuntimeError("simulated network failure")
+
+        monkeypatch.setattr(r, "_call_groq", _raise)
+        results, reranked = r.rerank("query", pool, top_k=3)
+        assert reranked is False
+        assert [x.chunk_id for x in results] == [c.chunk_id for c in pool]
+
+    def test_circuit_breaker_opens_after_repeated_failures(self, monkeypatch):
+        r = GroqListwiseReranker()
+        pool = _pool(3)
+        calls = {"n": 0}
+
+        def _raise(query, pool):
+            calls["n"] += 1
+            raise RuntimeError("simulated failure")
+
+        monkeypatch.setattr(r, "_call_groq", _raise)
+        for _ in range(CIRCUIT_FAILURE_THRESHOLD):
+            r.rerank(f"query {_}", pool, top_k=3)
+        assert calls["n"] == CIRCUIT_FAILURE_THRESHOLD
+
+        # Circuit now open: another call must not reach _call_groq at all.
+        r.rerank("one more query", pool, top_k=3)
+        assert calls["n"] == CIRCUIT_FAILURE_THRESHOLD
+
+    def test_cache_hit_skips_second_call(self, monkeypatch):
+        r = GroqListwiseReranker()
+        pool = _pool(3)
+        calls = {"n": 0}
+
+        def _order(query, pool):
+            calls["n"] += 1
+            return [2, 1, 0]
+
+        monkeypatch.setattr(r, "_call_groq", _order)
+        r.rerank("same query", pool, top_k=3)
+        r.rerank("same query", pool, top_k=3)
+        assert calls["n"] == 1
+
+    def test_is_valid_permutation(self):
+        assert GroqListwiseReranker._is_valid_permutation([0, 1, 2], 3) is True
+        assert GroqListwiseReranker._is_valid_permutation([0, 1], 3) is False
+        assert GroqListwiseReranker._is_valid_permutation([0, 1, 1], 3) is False
+        assert GroqListwiseReranker._is_valid_permutation([0, 1, 5], 3) is False
+
+    def test_get_reranker_returns_same_instance(self):
+        assert get_reranker() is get_reranker()
 
 
 # ===========================================================================
@@ -391,24 +488,33 @@ class TestHybridRetrieverIntegration:
         assert r.retrieval_mode == "hybrid+rerank"
         assert r.reranked is True
 
-    def test_reranked_results_have_rerank_score(self, retriever):
+    def test_rerank_mode_and_method_agree(self, retriever):
+        # The mode label and rerank_method must never claim reranking that
+        # didn't happen -- this is the actual bug this phase fixes. Either
+        # both say "reranked" or neither does; there is no third state.
         r = retriever.retrieve_by_text(
             "library book issue",
             use_bm25=True, use_reranker=True,
             top_k_dense=15, top_k_bm25=15, top_k_fusion=15, top_k_final=5,
         )
-        for result in r.results:
-            assert result.rerank_score is not None
-            assert 0.0 <= result.rerank_score <= 1.0
+        if r.reranked:
+            assert r.retrieval_mode in ("hybrid+rerank", "dense+rerank")
+            assert r.rerank_method == "groq_listwise"
+        else:
+            assert r.retrieval_mode in ("hybrid", "dense")
+            assert r.rerank_method is None
 
-    def test_rerank_scores_sorted_descending(self, retriever):
+    def test_reranked_results_never_carry_a_fabricated_score(self, retriever):
+        # A listwise reranker yields an order, not a per-passage score.
+        # rerank_score must stay None even when reranking succeeded --
+        # synthesizing one would silently feed a fake number into
+        # confidence and prompt-threshold filtering downstream.
         r = retriever.retrieve_by_text(
             "student placement process",
             use_bm25=True, use_reranker=True,
             top_k_dense=25, top_k_bm25=25, top_k_fusion=25, top_k_final=5,
         )
-        scores = [res.rerank_score for res in r.results]
-        assert scores == sorted(scores, reverse=True)
+        assert all(res.rerank_score is None for res in r.results)
 
     def test_hybrid_vs_dense_may_differ(self, retriever):
         # Results can legitimately differ between modes — just verify both run

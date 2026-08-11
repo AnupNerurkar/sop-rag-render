@@ -15,7 +15,7 @@ Full pipeline:
           BM25SearchBackend   →  top_k_bm25  results  (if use_bm25)
         ↓ RecipRankFusion.fuse()
     fused candidates (top_k_fusion)
-        ↓ CrossEncoderReranker.rerank()           (if use_reranker)
+        ↓ GroqListwiseReranker.rerank()            (if use_reranker)
     top_k_final results
         ↓ _build_results()
     RetrievalResponse
@@ -215,19 +215,22 @@ class Retriever:
             candidate_pool = dense_results[: query.top_k_fusion]
 
         # --- 7. Rerank (optional) ---
+        # rerank() itself never raises for expected failure modes (timeout,
+        # bad JSON, an invalid permutation, the circuit breaker being open)
+        # -- it reports them through the `reranked` boolean instead, which
+        # is what makes the mode label below trustworthy. A try/except here
+        # would only mask a genuine bug in that contract.
         reranked = False
+        rerank_method: Optional[str] = None
         if query.use_reranker and candidate_pool:
-            try:
-                from retrieval.reranker import get_reranker
-                candidate_pool = get_reranker().rerank(
-                    query      = clean_text,
-                    candidates = candidate_pool,
-                    top_k      = query.top_k_final,
-                )
-                reranked = True
-            except Exception as e:
-                logger.warning(f"[RETRIEVER] Reranker failed, returning fused results: {e}")
-                candidate_pool = candidate_pool[: query.top_k_final]
+            from retrieval.reranker import get_reranker
+            candidate_pool, reranked = get_reranker().rerank(
+                query      = clean_text,
+                candidates = candidate_pool,
+                top_k      = query.top_k_final,
+            )
+            if reranked:
+                rerank_method = "groq_listwise"
         else:
             # Use top_k (legacy) or top_k_final, whichever the caller set
             final_k = query.top_k_final if query.use_reranker else query.top_k
@@ -261,6 +264,7 @@ class Retriever:
             top_k_requested  = query.top_k,
             latency_ms       = round(latency_ms, 2),
             reranked         = reranked,
+            rerank_method    = rerank_method,
             retrieval_mode   = mode,
             applied_filters  = applied,
         )

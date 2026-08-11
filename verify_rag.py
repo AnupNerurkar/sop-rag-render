@@ -135,18 +135,29 @@ def check_embedding_model() -> None:
 
 
 def check_reranker() -> None:
-    """Check 4: BGE cross-encoder reranker loads."""
-    _section("Check 4 -- Cross-Encoder Reranker")
+    """Check 4: reranker actually reorders results (a live Groq call, not just construction).
+
+    There is no local model to "load" any more -- the old is_loaded check
+    would have passed unconditionally the moment the class was instantiated,
+    which is exactly the kind of check that let the previous reranker report
+    success for a rerank that had never run. Only a real rerank() call that
+    returns reranked=True is evidence this actually works.
+    """
+    _section("Check 4 -- Reranker (Groq listwise)")
     try:
-        from retrieval.reranker import get_reranker, RERANKER_MODEL
-        t0      = time.perf_counter()
-        rr      = get_reranker()
+        from retrieval.hybrid_search import RawSearchResult
+        from retrieval.reranker import get_reranker
+        candidates = [
+            RawSearchResult(chunk_id=f"c{i}", content=f"sample passage {i} about admissions", score=1.0 - i * 0.1, distance=None)
+            for i in range(5)
+        ]
+        t0 = time.perf_counter()
+        _, reranked = get_reranker().rerank("admissions process", candidates, top_k=5)
         elapsed = time.perf_counter() - t0
-        assert rr.is_loaded, "Reranker.is_loaded is False after get_reranker()"
-        _check("Reranker loaded", True, f"model={RERANKER_MODEL}  load={elapsed:.1f}s")
-        _RESULTS["Reranker"] = True
+        _check("Reranker call succeeded", reranked, f"reranked={reranked}  latency={elapsed:.1f}s")
+        _RESULTS["Reranker"] = reranked
     except Exception as exc:
-        _check("Reranker loaded", False, str(exc)[:80])
+        _check("Reranker call succeeded", False, str(exc)[:80])
         _RESULTS["Reranker"] = False
 
 

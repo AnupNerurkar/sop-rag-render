@@ -6,7 +6,7 @@ Comparative retrieval quality evaluation.
 Compares three retrieval modes on a 20-query test set:
     Mode A: Dense Only         (BGE embedding + the vector store)
     Mode B: Hybrid             (Dense + BM25 + RRF, no reranker)
-    Mode C: Hybrid + Reranker  (Dense + BM25 + RRF + bge-reranker-base)
+    Mode C: Hybrid + Reranker  (Dense + FTS5 + RRF + Groq listwise rerank)
 
 Relevance proxy:
     Since we lack human-labeled relevance judgments, we use department

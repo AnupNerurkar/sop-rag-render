@@ -26,12 +26,12 @@ from retrieval.retrieval_schema import (
 )
 from retrieval.retriever import Retriever, get_retriever
 from retrieval.fusion import RecipRankFusion
-from retrieval.reranker import CrossEncoderReranker, get_reranker
+from retrieval.reranker import get_reranker
 
 __all__ = [
     "Retriever", "get_retriever",
     "RetrievalQuery", "RetrievalResponse", "RetrievalResult",
     "RetrievalFilter", "SourceCitation",
     "RecipRankFusion",
-    "CrossEncoderReranker", "get_reranker",
+    "get_reranker",
 ]
