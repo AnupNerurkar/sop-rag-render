@@ -316,20 +316,31 @@ def set_document_uploader(doc_id: str, username: str) -> None:
         conn.close()
 
 
-def delete_document(doc_id: str) -> bool:
+def delete_document(doc_id: str, conn=None) -> bool:
     """Removes a document and all its chunks from the ledger. Returns True if a
-    document row was deleted. vectors must be removed separately by the
-    caller (vector_store.delete_by_doc_id)."""
-    conn = get_connection()
+    document row was deleted.
+
+    Accepts an existing connection so the caller (document_manager.delete_document)
+    can fold this into one transaction with vector_store.delete_by_doc_id --
+    embeddings, chunks and the document row either all disappear or none do.
+    """
+    owns_conn = conn is None
+    conn = conn or get_connection()
     cursor = conn.cursor()
     try:
         cursor.execute("DELETE FROM chunks WHERE doc_id = ?", (doc_id,))
         cursor.execute("DELETE FROM documents WHERE doc_id = ?", (doc_id,))
         deleted = cursor.rowcount > 0
-        conn.commit()
+        if owns_conn:
+            conn.commit()
         return deleted
+    except Exception:
+        if owns_conn:
+            conn.rollback()
+        raise
     finally:
-        conn.close()
+        if owns_conn:
+            conn.close()
 
 
 def get_document_by_source(source_file: str) -> dict | None:

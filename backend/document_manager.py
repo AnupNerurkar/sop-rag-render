@@ -392,18 +392,53 @@ def get_ingestion_logs(limit: int = 50) -> list[dict]:
 
 
 def delete_document(doc_id: str) -> dict:
-    """Removes a document from the vector store and the ledger (document + chunks).
-    Returns {removed: bool, vectors_removed: int}."""
-    vectors_removed = 0
-    try:
-        from vector_store.sqlite_store import get_vector_store
-        store = get_vector_store()
-        vectors_removed = store.delete_by_doc_id(doc_id) or 0
-    except Exception as exc:
-        logger.warning("[DOC_MANAGER] Vector delete failed for %s: %s", doc_id, exc)
+    """Removes a document from the vector store, the ledger (document + chunks),
+    and its staged file, in a single transaction. Returns
+    {removed: bool, vectors_removed: int}.
 
+    Previously the vector delete and the ledger delete were two independent
+    calls with the first one's failure only logged, not propagated -- a
+    vector-delete exception left the ledger delete to run anyway, producing
+    an orphaned embeddings row that stayed fully searchable (a "deleted"
+    document could still be retrieved and cited). Folding both into one
+    connection means either everything disappears or nothing does, and a
+    failure here is a real exception the caller sees, not a silent partial
+    delete.
+    """
     import ledger
-    removed = ledger.delete_document(doc_id)
+    from vector_store.sqlite_store import get_vector_store
+
+    doc = ledger.get_document_by_doc_id(doc_id)
+    # source_file is what ingestion actually populates (relative to project
+    # root, e.g. "data/staging/x.docx"); the older `filepath` column is left
+    # NULL by upsert_document's INSERT path -- reading it here always missed.
+    filepath = doc.get("source_file") if doc else None
+
+    conn = ledger.get_connection()
+    try:
+        store = get_vector_store()
+        vectors_removed = store.delete_by_doc_id(doc_id, conn=conn)
+        removed = ledger.delete_document(doc_id, conn=conn)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+    # Staged file removal is best-effort and deliberately outside the DB
+    # transaction (a filesystem delete can't be rolled back with it anyway).
+    # Left in place, it would resurrect on the next full run_ingestion() scan
+    # of data/staging/ -- the actual "deleted doc comes back" complaint.
+    if filepath:
+        try:
+            abs_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", filepath))
+            if os.path.isfile(abs_path):
+                os.remove(abs_path)
+                logger.info("[DOC_MANAGER] Removed staged file for %s: %s", doc_id[:12], filepath)
+        except Exception as exc:
+            logger.warning("[DOC_MANAGER] Could not remove staged file '%s' for %s: %s", filepath, doc_id[:12], exc)
+
     logger.info("[DOC_MANAGER] Deleted doc %s (ledger=%s, vectors=%s)", doc_id[:12], removed, vectors_removed)
     return {"removed": removed, "vectors_removed": vectors_removed}
 

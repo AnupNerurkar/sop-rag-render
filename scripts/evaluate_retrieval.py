@@ -35,11 +35,12 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 logging.basicConfig(level=logging.WARNING)  # suppress INFO during evaluation
@@ -175,6 +176,7 @@ class EvalMetrics:
     precision:  float = 0.0   # Precision@K
     recall:     float = 0.0   # Recall@K
     mrr:        float = 0.0   # Mean Reciprocal Rank
+    ndcg:       float = 0.0   # nDCG@K
     hit_at_1:   float = 0.0   # Hit@1
     hit_at_3:   float = 0.0   # Hit@3
     latency_mean: float = 0.0
@@ -191,13 +193,25 @@ def _is_relevant(result: dict, target_dept: str) -> bool:
     return result.get("metadata", {}).get("department", "") == target_dept
 
 
+def _ndcg_at_k(results: list[dict], target_dept: str, k: int, total_relevant: int) -> float:
+    """nDCG@K with binary relevance (department match)."""
+    import math
+    dcg = sum(
+        (1.0 if _is_relevant(r, target_dept) else 0.0) / math.log2(rank + 1)
+        for rank, r in enumerate(results[:k], start=1)
+    )
+    ideal_hits = min(k, max(total_relevant, 0))
+    idcg = sum(1.0 / math.log2(rank + 1) for rank in range(1, ideal_hits + 1))
+    return dcg / idcg if idcg > 0 else 0.0
+
+
 def compute_metrics(
     query_results: list[QueryResult],
     mode: str,
     k: int,
 ) -> EvalMetrics:
     """Compute retrieval metrics for a given mode across all queries."""
-    precisions, recalls, rrs = [], [], []
+    precisions, recalls, rrs, ndcgs = [], [], [], []
     hit1s, hit3s, latencies  = [], [], []
 
     # Get total chunks per department for recall computation
@@ -217,6 +231,9 @@ def compute_metrics(
         # Recall@K
         total_relevant = dept_totals.get(qr.target_dept, 1)
         recalls.append(len(relevant_in_topk) / total_relevant)
+
+        # nDCG@K
+        ndcgs.append(_ndcg_at_k(results, qr.target_dept, k, total_relevant))
 
         # MRR
         rr = 0.0
@@ -243,6 +260,7 @@ def compute_metrics(
         precision    = sum(precisions) / len(precisions) if precisions else 0.0,
         recall       = sum(recalls)    / len(recalls)    if recalls    else 0.0,
         mrr          = sum(rrs)        / len(rrs)        if rrs        else 0.0,
+        ndcg         = sum(ndcgs)      / len(ndcgs)      if ndcgs      else 0.0,
         hit_at_1     = sum(hit1s)      / len(hit1s)      if hit1s      else 0.0,
         hit_at_3     = sum(hit3s)      / len(hit3s)      if hit3s      else 0.0,
         latency_mean = sum(latencies)  / len(latencies)  if latencies  else 0.0,
@@ -253,9 +271,16 @@ def compute_metrics(
 
 
 def _get_dept_totals() -> dict:
-    """Count chunks per department from SQLite for recall computation."""
+    """Count chunks per department from SQLite for recall computation.
+
+    Uses LEDGER_DB_PATH when set so this measures the right database during
+    a re-index migration (Phase 7) rather than silently falling back to
+    whatever ingestion_ledger.db happens to be on disk.
+    """
     import sqlite3
-    db_path = os.path.join(os.path.dirname(__file__), "..", "ingestion_ledger.db")
+    db_path = os.environ.get("LEDGER_DB_PATH") or os.path.join(
+        os.path.dirname(__file__), "..", "ingestion_ledger.db"
+    )
     conn = sqlite3.connect(os.path.abspath(db_path))
     cur  = conn.cursor()
     cur.execute("SELECT department, COUNT(*) FROM chunks GROUP BY department")
@@ -378,7 +403,7 @@ def print_metrics_table(metrics: dict[str, EvalMetrics], k: int) -> None:
     print("=" * 65)
     print(f"  RETRIEVAL QUALITY COMPARISON  (K={k}, N={list(metrics.values())[0].n_queries} queries)")
     print("=" * 65)
-    header = f"  {'Mode':<18} {'P@K':>6} {'Recall@K':>9} {'MRR':>7} {'Hit@1':>7} {'Hit@3':>7} {'Lat(ms)':>8} {'P95(ms)':>8}"
+    header = f"  {'Mode':<18} {'P@K':>6} {'Recall@K':>9} {'MRR':>7} {'nDCG@K':>7} {'Hit@1':>7} {'Hit@3':>7} {'Lat(ms)':>8} {'P95(ms)':>8}"
     print(header)
     print("-" * 65)
 
@@ -394,6 +419,7 @@ def print_metrics_table(metrics: dict[str, EvalMetrics], k: int) -> None:
             f"{m.precision:>6.3f} "
             f"{m.recall:>9.3f} "
             f"{m.mrr:>7.3f} "
+            f"{m.ndcg:>7.3f} "
             f"{m.hit_at_1:>7.3f} "
             f"{m.hit_at_3:>7.3f} "
             f"{m.latency_mean:>8.0f} "
@@ -406,6 +432,7 @@ def print_metrics_table(metrics: dict[str, EvalMetrics], k: int) -> None:
     print(f"  P@K      — Precision@{k}: fraction of top-{k} from target department")
     print(f"  Recall@{k} — fraction of all target-dept chunks in top-{k}")
     print("  MRR      — Mean Reciprocal Rank (1/rank of first relevant result)")
+    print(f"  nDCG@{k}   — normalized Discounted Cumulative Gain (binary relevance)")
     print("  Hit@1    — fraction of queries where rank-1 is from target dept")
     print("  Hit@3    — fraction of queries where top-3 contains a relevant result")
     print("  Lat/P95  — mean and 95th-percentile latency in ms")
@@ -426,6 +453,10 @@ if __name__ == "__main__":
     parser.add_argument("--mode",  type=str, default=None,
                         help="Comma-separated modes: dense,hybrid,rerank (default: all)")
     parser.add_argument("--quiet", action="store_true",   help="Suppress per-query output")
+    parser.add_argument("--json",  type=str, default=None,
+                        help="Write metrics as JSON to this path (for before/after diffing)")
+    parser.add_argument("--label", type=str, default=None,
+                        help="Label stored in the JSON output (e.g. 'baseline', 'phase2')")
     args = parser.parse_args()
 
     modes = args.mode.split(",") if args.mode else ["dense", "hybrid", "rerank"]
@@ -433,3 +464,15 @@ if __name__ == "__main__":
 
     metrics = run_evaluation(k=args.k, modes=modes, quiet=args.quiet)
     print_metrics_table(metrics, k=args.k)
+
+    if args.json:
+        import datetime
+        payload = {
+            "label":     args.label,
+            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "k":         args.k,
+            "modes":     {mode: asdict(m) for mode, m in metrics.items()},
+        }
+        with open(args.json, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        print(f"  Wrote metrics to {args.json}")

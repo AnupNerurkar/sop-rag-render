@@ -122,22 +122,15 @@ def on_startup():
         vector_count = store.get_collection_stats().get("vector_count", 0)
         ledger_chunk_count = ledger.get_chunk_count()
 
-        # Orphans are vectors whose chunk row is gone from the ledger. Both
-        # tables live in the same SQLite file, so this is one anti-join rather
-        # than pulling every id into Python as the old backend did.
-        orphaned_count = 0
-        if vector_count > 0:
-            conn = ledger.get_connection()
-            try:
-                cur = conn.cursor()
-                cur.execute(
-                    "SELECT COUNT(*) AS cnt FROM embeddings "
-                    "WHERE id NOT IN (SELECT chunk_id FROM chunks)"
-                )
-                row = cur.fetchone()
-                orphaned_count = row["cnt"] if not isinstance(row, tuple) else row[0]
-            finally:
-                conn.close()
+        # Orphans are vectors whose chunk row is gone from the ledger -- the
+        # signature of a delete that didn't fully commit (see
+        # document_manager.delete_document, now transactional). Swept, not
+        # just counted: an orphan is otherwise still fully searchable and can
+        # surface as a citation for a document that was supposedly deleted.
+        orphaned_count = store.sweep_orphaned_embeddings() if vector_count > 0 else 0
+        if orphaned_count > 0:
+            # Swept rows change the vector count reported above; keep it honest.
+            vector_count = store.get_collection_stats().get("vector_count", 0)
 
         logging.info(
             f"[STARTUP] [VALIDATION] Ingestion Integrity Report:\n"

@@ -282,6 +282,13 @@ class SQLiteVectorStore:
             # defaults to chunk_index 0 and every "open source" click lands in
             # the same spot (see commit 409ee15).
             #
+            # INNER, not LEFT: an embeddings row with no matching chunks row is
+            # an orphan left behind by a delete that didn't fully commit. A LEFT
+            # JOIN would surface it anyway with blanked-out citation fields --
+            # exactly the "phantom source with no page/section" a user reported
+            # seeing for documents they had already deleted. It should vanish
+            # from search results entirely, which INNER does for free.
+            #
             # The filter never reaches this statement: the only predicate here
             # is on e.id, which we control. filters.py emits bare column names
             # that also exist on `chunks`, so letting it near a join would raise
@@ -294,7 +301,7 @@ class SQLiteVectorStore:
                        e.category, e.title, e.version,
                        c.chunk_index, c.total_chunks, c.section_heading, c.source_file
                 FROM embeddings e
-                LEFT JOIN chunks c ON c.chunk_id = e.id
+                INNER JOIN chunks c ON c.chunk_id = e.id
                 WHERE e.id IN ({placeholders})
                 """,
                 ids,
@@ -430,21 +437,58 @@ class SQLiteVectorStore:
         finally:
             conn.close()
 
-    def delete_by_doc_id(self, doc_id: str) -> None:
+    def delete_by_doc_id(self, doc_id: str, conn=None) -> int:
+        """Deletes all embeddings for a document. Returns the row count deleted.
+
+        Accepts an existing connection so the caller (document_manager.delete_document)
+        can fold this into the same transaction as the ledger's chunk/document
+        deletes -- a delete that only removes half the rows must not be allowed
+        to commit.
+        """
         self.initialize()
-        conn = get_connection()
+        owns_conn = conn is None
+        conn = conn or get_connection()
         cursor = conn.cursor()
         try:
             cursor.execute("DELETE FROM embeddings WHERE doc_id = ?", (doc_id,))
-            conn.commit()
-            logger.info(f"[SQLITE_VEC] Deleted all embeddings for doc_id: {doc_id}")
+            deleted = cursor.rowcount
+            if owns_conn:
+                conn.commit()
+            logger.info(f"[SQLITE_VEC] Deleted {deleted} embeddings for doc_id: {doc_id}")
+            return deleted
         except Exception as e:
-            conn.rollback()
+            if owns_conn:
+                conn.rollback()
             logger.error(f"[SQLITE_VEC] Failed to delete embeddings for doc_id {doc_id}: {e}")
             raise
         finally:
-            conn.close()
+            if owns_conn:
+                conn.close()
 
     def collection_exists(self) -> bool:
         self.initialize()
         return self.get_collection_stats()["count"] > 0
+
+    def sweep_orphaned_embeddings(self) -> int:
+        """Deletes embeddings rows whose chunk no longer exists in the ledger.
+
+        A healthy delete never produces these (delete_by_doc_id runs inside
+        the same transaction as the ledger's chunk delete now), but this
+        cleans up anything left over from before that fix, or from a delete
+        that failed between the two DELETEs in an older build. Safe to run
+        on every startup: a zero count is the common case and is logged as
+        such, so a nonzero count is a visible signal something upstream
+        still isn't transactional.
+        """
+        self.initialize()
+        conn = get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                "DELETE FROM embeddings WHERE id NOT IN (SELECT chunk_id FROM chunks)"
+            )
+            deleted = cursor.rowcount
+            conn.commit()
+            return deleted
+        finally:
+            conn.close()
