@@ -46,11 +46,17 @@ class _FakeCitation:
 class _FakeResult:
     """Mimics retrieval.retrieval_schema.RetrievalResult for the pure nodes."""
     def __init__(self, chunk_id, content, score, doc_id="d1", display_name="VIT Academics",
-                 rerank_score=None):
+                 rerank_score=None, distance=None):
         self.chunk_id = chunk_id
         self.content = content
         self.score = score
         self.rerank_score = rerank_score
+        # response_schema.compute_confidence (Phase 4) reads distance, not
+        # score/rerank_score directly. Default derives it the same way
+        # _make_result does in test_rag_pipeline.py, so a caller that
+        # doesn't care about confidence can still get a sane value; pass
+        # distance= explicitly to control compute_confidence's output.
+        self.distance = distance if distance is not None else (1.0 - score)
         self.citation = _FakeCitation(doc_id=doc_id, display_name=display_name)
 
 
@@ -160,14 +166,18 @@ class TestContextValidator:
 
 class TestConfidence:
     def test_high_confidence_finalizes(self):
+        # compute_confidence (Phase 4) blends top1 with mean(top3) rather
+        # than reading a single value: top1=0.90, mean_top3=(0.90+0.70)/2
+        # =0.80, blend = 0.7*0.90 + 0.3*0.80 = 0.87. Chosen to land clear of
+        # any float-rounding boundary rather than exactly on one.
         results = [
-            _FakeResult("c1", "x", 0.9, doc_id="d1", rerank_score=0.9),
-            _FakeResult("c2", "y", 0.8, doc_id="d2", rerank_score=0.8),
+            _FakeResult("c1", "x", 0.90, doc_id="d1"),
+            _FakeResult("c2", "y", 0.70, doc_id="d2"),
         ]
         out = M.node_confidence_evaluator(
             {"validated_results": results, "answer": "A detailed grounded answer.", "retry_count": 0}
         )
-        assert out["confidence"] == "90%"
+        assert out["confidence"] == "87%"
         assert out["control"] == "finalize"
         assert out["hallucination_risk"] == "low"
 

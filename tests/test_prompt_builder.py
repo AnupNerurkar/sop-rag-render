@@ -453,11 +453,23 @@ class TestRenderSystemPrompt:
             "UNAVAILABLE INFORMATION",
             "PREFER LATEST VERSION",
             "CONFLICTING SOPs",
-            "CONFIDENCE",
             "CITATIONS",
             "NO FABRICATION",
         ]:
             assert rule_phrase in prompt, f"Rule '{rule_phrase}' missing from DEFAULT template"
+
+    def test_default_template_has_no_self_reported_confidence_rule(self, builder):
+        # Phase 4: the model is never asked to self-report a confidence
+        # number any more -- response_schema.compute_confidence is the only
+        # confidence signal in the pipeline, and it's retrieval-based.
+        prompt = builder._render_system_prompt(PromptTemplate.DEFAULT, [])
+        assert "Confidence:" not in prompt
+        assert "[Confidence" not in prompt
+
+    def test_default_template_instructs_canonical_fallback_text(self, builder):
+        from response_schema import FALLBACK_ANSWER
+        prompt = builder._render_system_prompt(PromptTemplate.DEFAULT, [])
+        assert FALLBACK_ANSWER in prompt
 
     def test_concise_template_shorter(self, builder):
         default_len = len(builder._render_system_prompt(PromptTemplate.DEFAULT, []))

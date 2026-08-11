@@ -7,16 +7,17 @@ Wires together every completed phase into a single coherent call:
 
     User query + role
         |
-        v  [Phase 6] Retriever (hybrid dense+BM25+RRF+CrossEncoder)
+        v  Retriever (dense + SQLite FTS5 + RRF + Groq listwise rerank)
     list[RetrievalResult]
         |
-        v  [Phase 7] PromptBuilder (system prompt + context block + question)
+        v  PromptBuilder (system prompt + context block + question)
     BuiltPrompt
         |
-        v  [Phase 7B] RAGEngine  ->  Qwen2.5:7B via Ollama
+        v  RAGEngine  ->  Groq (LLM_BACKEND selects the active backend;
+                           Groq is what actually runs in production)
     RAGResponse  (answer + token counts + timing)
         |
-        v  [Phase 8] CitationEngine (dedup, version-prefer, inline refs)
+        v  CitationEngine (dedup, version-prefer, inline refs)
     CitationList
         |
         v  response_schema.py assembler
@@ -32,9 +33,12 @@ Design choices
 * Stateless per-call: RAGPipeline holds no call-level state between run()
   invocations.  Multiple concurrent callers are safe.
 
-* No-results short-circuit: when the retriever returns zero chunks we skip
-  the LLM entirely and return the standard insufficient-evidence message.
-  This prevents hallucination and saves latency.
+* Relevance gate: retrieval results below RELEVANCE_FLOOR (see
+  response_schema.passes_relevance_gate) are treated the same as zero
+  results -- skip the LLM entirely, return the standard fallback with no
+  citations. This is what actually prevents a confident-sounding answer
+  being generated off irrelevant context; a zero-results check alone
+  only catches the case where nothing was retrieved at all.
 
 * Role normalization: any case variant ("student", "STUDENT") is silently
   normalised to title-case before hitting the RBAC filter.
@@ -67,7 +71,7 @@ from response_schema import (
     FALLBACK_ANSWER,
     RAGPipelineResponse,
     compute_confidence,
-    parse_llm_confidence,
+    passes_relevance_gate,
     format_sources_block,
 )
 
@@ -100,21 +104,22 @@ class PipelineConfig(BaseModel):
     Group 2 -- Prompt
         Controls context window size, template variant, and metadata display.
     Group 3 -- Generation
-        Controls Qwen2.5:7B sampling parameters via Ollama.
+        Controls sampling parameters for whatever LLM_BACKEND selects
+        (Groq in production; see rag/rag_engine.py).
     """
 
     # ---- Retrieval ---------------------------------------------------------
     top_k_dense: int = Field(
-        default=15, ge=1, le=100,
+        default=25, ge=1, le=100,
         description="Dense candidates fetched from the vector store.",
     )
     top_k_bm25: int = Field(
-        default=15, ge=1, le=100,
-        description="BM25 candidates fetched from SQLite.",
+        default=25, ge=1, le=100,
+        description="Keyword (SQLite FTS5) candidates fetched.",
     )
     top_k_fusion: int = Field(
-        default=15, ge=1, le=100,
-        description="Candidates entering the cross-encoder reranker after RRF.",
+        default=20, ge=1, le=100,
+        description="Candidates entering the reranker after RRF.",
     )
     top_k_final: int = Field(
         default=5, ge=1, le=50,
@@ -143,11 +148,11 @@ class PipelineConfig(BaseModel):
         description="System-prompt template variant.",
     )
     max_chunks: int = Field(
-        default=5, ge=1, le=20,
+        default=6, ge=1, le=20,
         description="Maximum context chunks passed to the LLM.",
     )
     max_context_chars: int = Field(
-        default=8000, ge=500, le=32000,
+        default=12000, ge=500, le=32000,
         description="Hard cap on total context block characters.",
     )
     include_metadata: bool = Field(
@@ -161,12 +166,21 @@ class PipelineConfig(BaseModel):
 
     # ---- Generation --------------------------------------------------------
     temperature: float = Field(
-        default=0.7, ge=0.0, le=2.0,
-        description="Sampling temperature for Qwen2.5:7B.",
+        default=0.2, ge=0.0, le=2.0,
+        description=(
+            "Sampling temperature. Lowered from 0.7 -- grounded citation "
+            "work (answer only from supplied context, cite every claim) "
+            "wants determinism, not creative variance; 0.7 is a "
+            "conversational-assistant default that doesn't fit this task."
+        ),
     )
     max_tokens: int = Field(
-        default=512, ge=1, le=32768,
-        description="Maximum completion tokens (Ollama: num_predict).",
+        default=1500, ge=1, le=32768,
+        description=(
+            "Maximum completion tokens. Raised from 512, which could cut "
+            "off a multi-step SOP procedure mid-answer with no indication "
+            "to the user that the answer was truncated rather than complete."
+        ),
     )
     top_p: float = Field(
         default=0.9, ge=0.0, le=1.0,
@@ -245,12 +259,24 @@ class RAGPipeline:
         retrieval_time_ms  = retrieval_response.latency_ms
         results            = retrieval_response.results
 
-        # ---- Short-circuit: no results ----------------------------------
-        if not results:
-            logger.info(
-                "[PIPELINE] No results for query=%r role=%s -- returning fallback.",
-                question[:80], role,
-            )
+        # ---- Short-circuit: no results, or results too weak to trust ----
+        # Both cases get identical treatment: skip the LLM, zero citations,
+        # FALLBACK_ANSWER. The relevance gate is what actually stops a
+        # confident-sounding answer from being generated off irrelevant
+        # context -- an empty-results check alone doesn't catch "we found
+        # four chunks, none of them are about this question."
+        if not results or not passes_relevance_gate(results):
+            if not results:
+                logger.info(
+                    "[PIPELINE] No results for query=%r role=%s -- returning fallback.",
+                    question[:80], role,
+                )
+            else:
+                logger.info(
+                    "[PIPELINE] Relevance gate failed for query=%r role=%s "
+                    "(top score below RELEVANCE_FLOOR) -- returning fallback.",
+                    question[:80], role,
+                )
             wall_ms = (time.perf_counter() - t_wall_start) * 1000
             return RAGPipelineResponse(
                 answer               = FALLBACK_ANSWER,
@@ -258,7 +284,7 @@ class RAGPipeline:
                 formatted_answer     = FALLBACK_ANSWER,
                 citations            = [],
                 retrieved_documents  = 0,
-                retrieved_chunks     = 0,
+                retrieved_chunks     = len(results),
                 query                = question,
                 role                 = role,
                 processing_time_ms   = round(wall_ms, 2),
@@ -290,22 +316,8 @@ class RAGPipeline:
 
         # ---- Phase 4: Citation Engine -----------------------------------
         from rag.citation_engine import get_citation_engine
-        confidence, conf_score = parse_llm_confidence(rag_response.answer, results)
-        
-        import re
-        pattern = r"[\r\n]*(?:\[|\*\*)\s*Confidence:\s*[^\]\n\r\*]+(?:\]|\*\*)*(?:.*)?"
-        cleaned_answer = re.sub(pattern, "", rag_response.answer, flags=re.IGNORECASE).strip()
-        
-        pct = round(conf_score * 100)
-        if conf_score >= 0.70:
-            desc = "the information provided in the sources directly and completely answers the question."
-        elif conf_score >= 0.40:
-            desc = "the information provided in the sources partially answers the question and requires inference for a complete process."
-        else:
-            desc = "the information provided in the sources is only tangentially related to the question."
-            
-        final_answer_text = cleaned_answer + f"\n\n**Confidence: {pct}%** — {desc}"
-        citation_list = get_citation_engine().build(results, final_answer_text)
+        confidence, conf_score = compute_confidence(results)
+        citation_list = get_citation_engine().build(results, rag_response.answer)
 
         # ---- Assemble structured response --------------------------------
         sources_block          = format_sources_block(citation_list.citations)
@@ -415,7 +427,12 @@ class RAGPipeline:
         retrieval_time_ms  = retrieval_response.latency_ms
         results            = retrieval_response.results
 
-        if not results:
+        # Same relevance gate as run() -- previously this path only checked
+        # for zero results, so a streamed answer could confidently narrate
+        # off irrelevant context in exactly the case run() was already
+        # guarding against. See run()'s short-circuit for why the gate
+        # exists.
+        if not results or not passes_relevance_gate(results):
             wall_ms = (time.perf_counter() - t_wall_start) * 1000
             yield ("token", FALLBACK_ANSWER)
             yield ("meta", {
@@ -449,9 +466,15 @@ class RAGPipeline:
         full_answer = "".join(chunks).strip() or FALLBACK_ANSWER
 
         # ---- Citations + confidence from the complete answer -----------
+        # confidence is a retrieval signal (see response_schema.
+        # compute_confidence) -- it doesn't depend on the generated text,
+        # so it's identical whether computed here or in run(). Passing
+        # full_answer into it would have been meaningless anyway; the old
+        # parse_llm_confidence only used the answer text to scrape a
+        # self-reported number the model no longer writes.
         from rag.citation_engine import get_citation_engine
         citation_list          = get_citation_engine().build(results, full_answer)
-        confidence, conf_score = parse_llm_confidence(full_answer, results)
+        confidence, conf_score = compute_confidence(results)
         wall_ms                = (time.perf_counter() - t_wall_start) * 1000
 
         citations_payload = [

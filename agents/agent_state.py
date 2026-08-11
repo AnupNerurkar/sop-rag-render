@@ -58,9 +58,16 @@ class AgentConfig:
 
 DEFAULT_AGENT_CONFIG = AgentConfig()
 
+# Kept byte-identical to response_schema.FALLBACK_ANSWER (not imported --
+# this module is deliberately dependency-light, see the module docstring)
+# so RAGPipelineResponse.is_fallback recognizes an agent-path fallback the
+# same way it recognizes one from the main pipeline. Previously this was a
+# different, shorter string, so an agent response that correctly declined
+# to answer would still fail that check.
 FALLBACK_ANSWER = (
-    "I could not find this information in the institutional knowledge base. "
-    "Please try rephrasing your question or contact the relevant department."
+    "I could not find sufficient institutional evidence to answer this question. "
+    "The knowledge base may not contain information on this topic, or access may "
+    "be restricted for your role."
 )
 
 

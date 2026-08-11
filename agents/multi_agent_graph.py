@@ -526,12 +526,12 @@ def node_confidence_evaluator(state: AgentState) -> dict:
     retry_count = state.get("retry_count", 0)
 
     try:
-        from response_schema import parse_llm_confidence
-        pct_str, raw_score = parse_llm_confidence(answer, results)
+        from response_schema import compute_confidence
+        pct_str, raw_score = compute_confidence(results)
         confidence = pct_str
         confidence_score = round(float(raw_score), 4)
     except Exception as exc:
-        logger.warning("[MAGENT] parse_llm_confidence failed: %s", exc)
+        logger.warning("[MAGENT] compute_confidence failed: %s", exc)
         confidence, confidence_score = "0%", 0.0
 
     # The underlying logic for "LOW" or "UNKNOWN" confidence was:

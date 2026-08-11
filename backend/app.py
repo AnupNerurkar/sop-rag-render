@@ -33,6 +33,7 @@ Endpoints:
 
 import json
 import logging
+import os
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -60,6 +61,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Populated by the startup Groq model probe (see on_startup); read by
+# /api/health. Public and never containing an error message with request
+# content -- it's model-selection metadata, not diagnostics.
+_GROQ_MODEL_STATUS: dict = {}
 
 
 @app.on_event("startup")
@@ -150,6 +156,19 @@ def on_startup():
         )
     except Exception as exc:
         logging.error(f"[STARTUP] Ingestion validation failed: {exc}")
+
+    # Resolve and probe the active Groq model BEFORE anything constructs a
+    # GroqConfig (get_rag_engine() below does exactly that) -- GroqConfig
+    # reads GROQ_MODEL as a field default at construction time, so a
+    # fallback decided after that point would never take effect.
+    if os.environ.get("LLM_BACKEND", "ollama").strip().lower() == "groq":
+        try:
+            from rag.groq_client import resolve_active_model
+            global _GROQ_MODEL_STATUS
+            _GROQ_MODEL_STATUS = resolve_active_model()
+            logging.info(f"[STARTUP] Groq model: {_GROQ_MODEL_STATUS}")
+        except Exception as exc:
+            logging.error(f"[STARTUP] Groq model probe failed: {exc}")
 
     # Pre-load retrieval models (embedder & BM25) to avoid slow first queries
     try:
@@ -334,6 +353,18 @@ def indexing_status():
     """Whether a document is currently being ingested/embedded into the KB."""
     from backend.document_manager import get_indexing_state
     return get_indexing_state()
+
+
+@app.get("/api/health")
+def health():
+    """Liveness + active-model info. Public: no request content, just which
+    generation backend/model actually answered the startup probe -- useful
+    to confirm a Groq model fallback happened without grepping container logs."""
+    backend = os.environ.get("LLM_BACKEND", "ollama").strip().lower()
+    result = {"status": "ok", "llm_backend": backend}
+    if backend == "groq":
+        result["groq_model"] = _GROQ_MODEL_STATUS
+    return result
 
 
 # ── Public chat (no auth) ──────────────────────────────────────────────────────

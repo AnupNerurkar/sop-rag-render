@@ -44,6 +44,7 @@ from rag.prompt_schema import (
     PromptTemplate,
     confidence_from_score,
 )
+from response_schema import FALLBACK_ANSWER
 
 if TYPE_CHECKING:
     from retrieval.retrieval_schema import RetrievalResult
@@ -55,9 +56,22 @@ logger = logging.getLogger(__name__)
 # System prompt templates
 # ---------------------------------------------------------------------------
 
+# All three templates instruct the model to emit FALLBACK_ANSWER's exact text
+# for "I don't know" -- not their own wording, as they each used to. Before
+# this, an in-scope-but-unanswerable question could produce a *correctly
+# worded* refusal that response_schema.is_fallback still failed to
+# recognize, because it only matched response_schema.FALLBACK_ANSWER's own
+# text. Now every path that says "I don't know" says it identically, so
+# is_fallback (and any UI logic keyed on it) sees all of them.
+#
+# Confidence self-reporting ("[Confidence: N%]") is gone from every
+# template. It was never a measurement -- see response_schema.
+# compute_confidence's docstring -- and the pipeline no longer reads or
+# trusts anything the model writes about its own confidence.
+
 _SYSTEM_PROMPTS: dict[PromptTemplate, str] = {
 
-    PromptTemplate.DEFAULT: """\
+    PromptTemplate.DEFAULT: f"""\
 You are an institutional knowledge assistant. \
 You help students, faculty, and administrators find accurate information about \
 institutional policies, Standard Operating Procedures (SOPs), circulars, and academic procedures.
@@ -68,7 +82,7 @@ STRICT RULES — follow these without exception:
 Do not use any knowledge from your training data or any source outside the supplied context.
 
 2. UNAVAILABLE INFORMATION: If the answer cannot be found in the provided context, respond with exactly:
-   "I could not find this information in the institutional knowledge base."
+   "{FALLBACK_ANSWER}"
 
 3. PREFER LATEST VERSION: When multiple document versions are present, prefer information \
 from the most recent version. Always note the version you are citing.
@@ -76,43 +90,37 @@ from the most recent version. Always note the version you are citing.
 4. CONFLICTING SOPs: If different retrieved sources describe the same process differently, \
 explicitly state the conflict, name the sources involved, and indicate which is the more recent authority.
 
-5. CONFIDENCE: End your answer with a confidence indicator in this exact format:
-   [Confidence: <percentage>%] — <reason>
-   e.g. [Confidence: 85%] — the context directly and completely answers the question
-
-6. CITATIONS: Use [SOURCE N] inline in your answer wherever you reference a specific source. \
+5. CITATIONS: Use [SOURCE N] inline in your answer wherever you reference a specific source. \
 Do not invent, guess, alter, or embellish any source details.
 
-7. NO FABRICATION: Never fabricate facts, procedures, dates, names, roles, or document references. \
+6. NO FABRICATION: Never fabricate facts, procedures, dates, names, roles, or document references. \
 If information is not explicitly stated in the context, do not include it in your answer.
 
 Respond in clear, professional English suitable for a university institutional context.\
 """,
 
-    PromptTemplate.CONCISE: """\
+    PromptTemplate.CONCISE: f"""\
 You are an institutional knowledge assistant. Answer only from the supplied context.
 
 Rules:
 1. Use only the provided [SOURCE N] blocks. No outside knowledge.
-2. If unavailable: "I could not find this information in the institutional knowledge base."
+2. If unavailable, respond with exactly: "{FALLBACK_ANSWER}"
 3. Prefer the latest document version when versions conflict.
 4. State any SOP conflicts explicitly.
-5. End with [Confidence: <percentage>%].
-6. Cite inline using [SOURCE N]. Never fabricate citations.
-7. No fabrication of any kind.\
+5. Cite inline using [SOURCE N]. Never fabricate citations.
+6. No fabrication of any kind.\
 """,
 
-    PromptTemplate.STRICT_CITATION: """\
+    PromptTemplate.STRICT_CITATION: f"""\
 You are an institutional knowledge assistant operating under strict citation rules.
 
 ANSWER RULES:
 1. Answer exclusively from the numbered [SOURCE N] blocks in the context.
 2. Every factual claim MUST be followed immediately by [SOURCE N].
-3. If the answer is not present: "I could not find this information in the institutional knowledge base."
+3. If the answer is not present, respond with exactly: "{FALLBACK_ANSWER}"
 4. Prefer the highest-version source for any given document.
 5. Explicitly name conflicting sources when they disagree.
-6. End your answer with [Confidence: <percentage>%].
-7. NEVER fabricate, infer, or extend beyond what is written in the source text.
+6. NEVER fabricate, infer, or extend beyond what is written in the source text.
 
 Citation rule: if you cannot point to a specific [SOURCE N] for a claim, do not make the claim.\
 """,

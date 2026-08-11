@@ -225,65 +225,73 @@ class TestNormalizeRole:
 # ---------------------------------------------------------------------------
 
 class TestComputeConfidence:
-    def test_no_results_returns_unknown(self):
+    """
+    compute_confidence is dense-cosine-only now (Phase 4): rerank_score is
+    never read (a listwise reranker doesn't produce one -- see
+    retrieval/rerank_client.py), and there's no self-reported LLM number to
+    fall back to any more. _make_result derives `distance` from `score`
+    (distance = 1 - score), so these tests control confidence via `score`.
+    """
+
+    def test_no_results_returns_zero(self):
         lbl, score = compute_confidence([])
         assert lbl == "0%"
         assert score == 0.0
 
-    def test_high_confidence_two_docs(self):
-        r1 = _make_result("doc1", rerank_score=0.85)
-        r2 = _make_result("doc2", rerank_score=0.75, rank=2)
-        lbl, score = compute_confidence([r1, r2])
-        assert lbl == "85%"
-        assert abs(score - 0.85) < 1e-6
-
-    def test_high_requires_two_docs(self):
-        r1 = _make_result("doc1", rerank_score=0.90)
-        lbl, score = compute_confidence([r1])
+    def test_single_result_equals_its_own_similarity(self):
+        # With one result, top1 == mean_top3, so the 0.7/0.3 blend collapses
+        # to exactly the result's own similarity.
+        r = _make_result("doc1", score=0.90)
+        lbl, score = compute_confidence([r])
         assert lbl == "90%"
         assert abs(score - 0.90) < 1e-6
 
-    def test_medium_by_score(self):
-        r1 = _make_result("doc1", rerank_score=0.55)
-        lbl, score = compute_confidence([r1])
-        assert lbl == "55%"
-        assert abs(score - 0.55) < 1e-6
-
-    def test_medium_by_two_docs(self):
-        r1 = _make_result("doc1", rerank_score=0.30)
-        r2 = _make_result("doc2", rerank_score=0.25, rank=2)
-        lbl, score = compute_confidence([r1, r2])
-        assert lbl == "30%"
-        assert abs(score - 0.30) < 1e-6
-
-    def test_low_confidence(self):
-        r1 = _make_result("doc1", rerank_score=0.20)
-        lbl, score = compute_confidence([r1])
+    def test_no_hard_cliff_below_070(self):
+        # The old implementation hard-zeroed anything under 0.70 similarity.
+        # That's gone -- confidence is continuous now.
+        r = _make_result("doc1", score=0.20)
+        lbl, score = compute_confidence([r])
         assert lbl == "20%"
         assert abs(score - 0.20) < 1e-6
 
-    def test_uses_rerank_score_preferentially(self):
-        r = _make_result("doc1", score=0.30, rerank_score=0.75)
-        lbl, score = compute_confidence([r])
-        assert lbl == "75%"
-        assert abs(score - 0.75) < 1e-6
+    def test_blends_top1_with_mean_of_top3(self):
+        r1 = _make_result("doc1", score=0.90, rank=1)
+        r2 = _make_result("doc2", score=0.60, rank=2)
+        r3 = _make_result("doc3", score=0.30, rank=3)
+        lbl, score = compute_confidence([r1, r2, r3])
+        # top1=0.90, mean_top3=(0.90+0.60+0.30)/3=0.60
+        # conf = 0.7*0.90 + 0.3*0.60 = 0.63 + 0.18 = 0.81
+        assert lbl == "81%"
+        assert abs(score - 0.81) < 1e-6
 
-    def test_falls_back_to_score_when_no_rerank(self):
+    def test_ignores_rerank_score_entirely(self):
+        # rerank_score must have zero influence -- only score/distance do.
+        r = _make_result("doc1", score=0.30, rerank_score=0.99)
+        lbl, score = compute_confidence([r])
+        assert lbl == "30%"
+        assert abs(score - 0.30) < 1e-6
+
+    def test_none_rerank_score_does_not_affect_result(self):
         r = _make_result("doc1", score=0.80, rerank_score=None)
         lbl, score = compute_confidence([r])
         assert lbl == "80%"
         assert abs(score - 0.80) < 1e-6
 
-    def test_boundary_exact_070(self):
-        r1 = _make_result("doc1", rerank_score=0.70)
-        r2 = _make_result("doc2", rerank_score=0.65, rank=2)
-        lbl, _ = compute_confidence([r1, r2])
-        assert lbl == "70%"
+    def test_fts_only_hits_are_skipped(self):
+        # distance=None (Phase 2: FTS-only hits aren't on the cosine scale)
+        # must not contribute to or crash the computation.
+        from retrieval.retrieval_schema import RetrievalResult
+        r_fts = _make_result("doc_fts", score=0.99).model_copy(update={"distance": None})
+        r_dense = _make_result("doc_dense", score=0.50, rank=2)
+        lbl, score = compute_confidence([r_fts, r_dense])
+        assert lbl == "50%"
+        assert abs(score - 0.50) < 1e-6
 
-    def test_boundary_exact_040(self):
-        r1 = _make_result("doc1", rerank_score=0.40)
-        lbl, _ = compute_confidence([r1])
-        assert lbl == "40%"
+    def test_all_fts_only_returns_zero(self):
+        r_fts = _make_result("doc1", score=0.99).model_copy(update={"distance": None})
+        lbl, score = compute_confidence([r_fts])
+        assert lbl == "0%"
+        assert score == 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -408,7 +416,12 @@ class TestPipelineConfig:
         assert cfg.use_bm25 is True
         assert cfg.use_reranker is True
         assert cfg.top_k_final == 5
-        assert cfg.temperature == 0.7
+        # Lowered from 0.7 (Phase 4): grounded citation work wants
+        # determinism, not conversational-assistant creative variance.
+        assert cfg.temperature == 0.2
+        # Raised from 512 (Phase 4): could truncate a multi-step SOP answer
+        # mid-procedure with no indication to the user.
+        assert cfg.max_tokens == 1500
         assert cfg.prompt_template == PromptTemplate.DEFAULT
 
     def test_to_prompt_config(self):
@@ -557,10 +570,14 @@ class TestRAGPipelineUnit:
         assert resp.processing_time_ms > 0
 
     def test_confidence_attached_to_response(self):
+        # compute_confidence reads score/distance now, not rerank_score
+        # (Phase 4) -- both results score 0.90, so top1 == mean_top3 == 0.90
+        # and the blend collapses to exactly 0.90, well clear of
+        # RELEVANCE_FLOOR (0.60) so the pipeline doesn't short-circuit.
         _, _, mock_eng, mock_cite, mock_bp = self._pipeline_with_mocks()
         results = [
-            _make_result("doc1", rerank_score=0.90),
-            _make_result("doc2", rerank_score=0.80, rank=2),
+            _make_result("doc1", score=0.90),
+            _make_result("doc2", score=0.90, rank=2),
         ]
         pipeline = RAGPipeline()
         with (

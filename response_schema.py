@@ -19,6 +19,7 @@ LangGraph note:
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 from typing import Optional, TYPE_CHECKING
 
@@ -34,11 +35,63 @@ if TYPE_CHECKING:
 # Fallback answer
 # ---------------------------------------------------------------------------
 
+# The single canonical "could not answer" text. Previously three different
+# strings existed for what were really the same situation from the user's
+# perspective (no results at all, low-relevance results, or the model
+# reading real context and still finding nothing): this one
+# (response_schema.FALLBACK_ANSWER), a shorter one hardcoded into every
+# prompt template's rule 2, and a third one in agents/agent_state.py. Only
+# the first was ever checked by is_fallback, so an answer produced by
+# either of the other two paths silently failed that check -- e.g. the
+# recorded baseline case where the model correctly said "I could not find
+# this information..." but is_fallback still returned False and the
+# response still carried four unrelated citations. prompt_builder.py and
+# agents/agent_state.py both now import this constant instead of hardcoding
+# their own wording, so all three paths produce byte-identical text and
+# is_fallback (below) is a single accurate check regardless of which path
+# produced the answer.
 FALLBACK_ANSWER: str = (
     "I could not find sufficient institutional evidence to answer this question. "
     "The knowledge base may not contain information on this topic, or access may "
     "be restricted for your role."
 )
+
+
+# ---------------------------------------------------------------------------
+# Relevance gate
+# ---------------------------------------------------------------------------
+
+# Below this dense cosine similarity, retrieved context is treated as noise
+# and the LLM is never called -- this is what actually stops the model from
+# confidently answering off irrelevant context (the recorded baseline case:
+# "What is the capital of France?" retrieved four SOP chunks from unrelated
+# departments, and the model produced a correctly-worded refusal that still
+# shipped with four fabricated citations, because nothing gated generation
+# on retrieval quality in the first place). Env-overridable so it can be
+# tuned on the live box without a rebuild -- it should be calibrated against
+# the unanswerable-question bucket in eval-results, not guessed.
+RELEVANCE_FLOOR = float(os.environ.get("RELEVANCE_FLOOR", "0.60"))
+
+# Below this many chunks clearing the floor, the pipeline still refuses to
+# answer even if the top hit alone is strong -- a single borderline match is
+# a weaker basis for a grounded institutional answer than the presence of
+# corroborating context, though it doesn't have to be a hard gate on its own
+# (top1 clearing RELEVANCE_FLOOR is sufficient by itself; see
+# passes_relevance_gate).
+MIN_SUPPORTING_CHUNKS = int(os.environ.get("MIN_SUPPORTING_CHUNKS", "1"))
+
+
+def passes_relevance_gate(results: "list[RetrievalResult]") -> bool:
+    """
+    True if retrieval quality is high enough to bother calling the LLM at
+    all. False means: skip generation, return FALLBACK_ANSWER, zero
+    citations -- exactly the same treatment as retrieving zero results, and
+    for the same reason (nothing here supports a grounded answer).
+    """
+    if not results:
+        return False
+    _, score = compute_confidence(results)
+    return score >= RELEVANCE_FLOOR
 
 
 # ---------------------------------------------------------------------------
@@ -49,7 +102,25 @@ def compute_confidence(
     results: "list[RetrievalResult]",
 ) -> tuple[str, float]:
     """
-    Infers answer confidence purely from retrieval signals — no LLM call.
+    Infers answer confidence purely from retrieval signals -- no LLM call,
+    and no longer even a channel for one: this used to be a fallback for
+    when the model didn't self-report a [Confidence: N%] line, but trusting
+    the model's own claim meant "confidence" was usually just whatever
+    number it decided to write, disconnected from whether the retrieved
+    context actually supported the answer. There is now exactly one
+    confidence signal in the whole pipeline, and it comes from here.
+
+    Uses dense cosine similarity only -- FTS-only hits (Phase 2) carry
+    distance=None and are skipped, since a BM25/FTS relevance score isn't
+    on the cosine scale and treating it as one (as the pre-Phase-2 code did
+    with `distance = 1.0 - norm_score`) silently corrupted this exact
+    computation.
+
+    Blends the top result with the next two rather than reading rank 0
+    alone, so one lucky top hit surrounded by weak support scores lower
+    than three consistently strong hits -- and removes the old hard
+    similarity<0.70 cliff, which made confidence effectively binary (0% or
+    "70%+") and hid everything in between.
 
     Args:
         results: list[RetrievalResult] in rank order (index 0 = best).
@@ -57,48 +128,18 @@ def compute_confidence(
     Returns:
         (confidence_percentage_str, raw_confidence_score)
     """
-    if not results:
+    dense = [r for r in results if r.distance is not None]
+    if not dense:
         return "0%", 0.0
 
-    # FTS-only hits (Phase 2) carry distance=None -- not on the cosine scale,
-    # so they can't contribute here. results[0] is the best by fused rank,
-    # which may be an FTS-only hit; fall through to the first result that
-    # actually has a dense distance.
-    best = next((r for r in results if r.distance is not None), None)
-    if best is None:
-        return "0%", 0.0
+    similarities = [max(0.0, min(1.0, 1.0 - r.distance)) for r in dense[:3]]
+    top1 = similarities[0]
+    mean_top3 = sum(similarities) / len(similarities)
 
-    # Cosine similarity is 1.0 - distance
-    similarity = 1.0 - best.distance
-    
-    # Threshold check: if similarity is below 70%, the retrieved context is irrelevant
-    if similarity < 0.70:
-        return "0%", 0.0
-
-    raw_confidence_score = max(0.0, min(1.0, similarity))
+    raw_confidence_score = 0.7 * top1 + 0.3 * mean_top3
+    raw_confidence_score = max(0.0, min(1.0, raw_confidence_score))
     confidence_percentage = round(raw_confidence_score * 100)
     return f"{confidence_percentage}%", raw_confidence_score
-
-
-def parse_llm_confidence(
-    answer: str,
-    results: "list[RetrievalResult]",
-) -> tuple[str, float]:
-    """
-    Extracts the self-assessed confidence score from the LLM response text if present.
-    Falls back to retrieval similarity (compute_confidence) if not found.
-    """
-    if not answer:
-        return compute_confidence(results)
-
-    import re
-    # Matches [Confidence: 80%] or **Confidence: 80%** or Confidence: 80%
-    match = re.search(r"(?:\[|\*\*)\s*Confidence:\s*(\d+)%\s*(?:\]|\*\*)", answer, re.IGNORECASE)
-    if match:
-        pct = int(match.group(1))
-        return f"{pct}%", float(pct) / 100.0
-
-    return compute_confidence(results)
 
 
 # ---------------------------------------------------------------------------
@@ -225,7 +266,7 @@ class RAGPipelineResponse(BaseModel):
     )
     confidence_score: float = Field(
         default=0.0,
-        description="Effective score of the top retrieval result (rerank_score ?? score).",
+        description="compute_confidence()'s blended dense-cosine score: 0.7*top1 + 0.3*mean(top3).",
     )
 
     # --- Provenance ---
@@ -262,10 +303,14 @@ class RAGPipelineResponse(BaseModel):
 
     @property
     def is_fallback(self) -> bool:
-        """True when the answer is the standard insufficient-evidence fallback."""
-        return self.answer.startswith(
-            "I could not find sufficient institutional evidence"
-        )
+        """
+        True when the answer is the standard insufficient-evidence fallback,
+        from any of the three paths that can produce it (no results, below
+        the relevance gate, or the model reading real context and still
+        finding nothing) -- they all now emit the same FALLBACK_ANSWER text,
+        so one prefix check against the actual constant covers all three.
+        """
+        return self.answer.startswith(FALLBACK_ANSWER[:40])
 
     def short_summary(self) -> str:
         """One-line summary for logging / CLI output."""
