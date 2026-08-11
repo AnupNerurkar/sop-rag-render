@@ -148,11 +148,35 @@ class SQLiteVectorStore:
                 department TEXT,
                 category TEXT,
                 title TEXT,
-                version TEXT
+                version TEXT,
+                doc_status TEXT DEFAULT 'active'
             )
             """)
+            # doc_status: added after this table already existed on some
+            # installs, so CREATE ... IF NOT EXISTS above doesn't add it to
+            # them -- an explicit migration + backfill is needed too. Must
+            # live here (not just on `chunks`) because filters.py emits a
+            # bare "doc_status" column name that the dense query resolves
+            # directly against `embeddings`, never `chunks`.
+            cols = {row["name"] for row in cursor.execute("PRAGMA table_info(embeddings)")}
+            if "doc_status" not in cols:
+                cursor.execute("ALTER TABLE embeddings ADD COLUMN doc_status TEXT DEFAULT 'active'")
+            try:
+                # Cross-table backfill -- defensive because this is the one
+                # place sqlite_store depends on `documents` existing, and
+                # every other caller of get_vector_store() assumes ledger.
+                # initialize_db() already ran first (true in the app's own
+                # startup order) but that isn't enforced here.
+                cursor.execute("""
+                    UPDATE embeddings SET doc_status = 'superseded'
+                    WHERE doc_status != 'superseded'
+                      AND doc_id IN (SELECT doc_id FROM documents WHERE status = 'superseded')
+                """)
+            except Exception as exc:
+                logger.warning(f"[SQLITE_VEC] doc_status backfill skipped (documents table not ready?): {exc}")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_embeddings_doc_id ON embeddings(doc_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_embeddings_access_level ON embeddings(access_level)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_embeddings_doc_status ON embeddings(doc_status)")
             conn.commit()
             self._initialized = True
             logger.info("[SQLITE_VEC] Local SQLite vector store initialized.")

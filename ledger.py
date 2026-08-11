@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import logging
 import sqlite3
 import os
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "ingestion_ledger.db"))
 
@@ -120,6 +123,7 @@ def initialize_db():
         """)
 
         _migrate_chunks_embedding_columns(cursor)
+        _migrate_status_columns(cursor)
 
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_chunks_doc_id ON chunks(doc_id)"
@@ -388,7 +392,26 @@ def get_document_by_department(department: str) -> dict | None:
 
 
 def mark_document_superseded(doc_id: str) -> None:
-    """Marks an older document version as superseded."""
+    """
+    Marks an older document version as superseded and removes it from
+    retrieval -- updates documents.status, chunks.doc_status and
+    embeddings.doc_status in one transaction.
+
+    Previously this only touched documents.status; chunks and embeddings
+    had no status of their own, so a superseded document's content stayed
+    fully retrievable (and citable) by both dense and keyword search
+    forever, contradicting the "prefer latest version" the citation engine
+    was already flagging it for at render time.
+
+    embeddings lives in the same database file (vector_store/sqlite_store.
+    py creates it via this same get_connection()) but isn't part of this
+    module's schema, so its update is defensive: on a connection that has
+    never initialized the vector store (embeddings table doesn't exist
+    yet), this logs and continues rather than failing the whole
+    supersession -- documents/chunks staying in sync is the load-bearing
+    part; embeddings will pick up doc_status via its own migration the
+    next time the app starts.
+    """
     now = datetime.utcnow().isoformat()
     conn = get_connection()
     cursor = conn.cursor()
@@ -398,6 +421,18 @@ def mark_document_superseded(doc_id: str) -> None:
             SET status = 'superseded', last_processed = ?
             WHERE doc_id = ?
         """, (now, doc_id))
+        cursor.execute("""
+            UPDATE chunks SET doc_status = 'superseded' WHERE doc_id = ?
+        """, (doc_id,))
+        try:
+            cursor.execute("""
+                UPDATE embeddings SET doc_status = 'superseded' WHERE doc_id = ?
+            """, (doc_id,))
+        except Exception as exc:
+            logger.warning(
+                "[LEDGER] Could not mark embeddings superseded for %s (vector "
+                "store not yet initialized on this connection?): %s", doc_id[:12], exc,
+            )
         conn.commit()
     except Exception as e:
         conn.rollback()
@@ -509,6 +544,38 @@ def _migrate_chunks_embedding_columns(cursor) -> None:
     _ensure_column(cursor, "chunks", "embedded_at", "TEXT")
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_chunks_embedded_at ON chunks(embedded_at)"
+    )
+
+
+def _migrate_status_columns(cursor) -> None:
+    """
+    Adds doc_status to chunks and backfills it from documents.status.
+
+    Retrieval filtering only ever cares about the binary "superseded or
+    not" -- documents.status has other lifecycle values (assessed,
+    ingested, chunked, embedded, corrupted, ...) that are irrelevant here,
+    so everything except 'superseded' collapses to 'active'.
+
+    Previously mark_document_superseded only flipped documents.status;
+    chunks and embeddings had no status of their own, so a superseded
+    (old-version) document's content stayed fully retrievable by both
+    dense and keyword search forever -- the citation engine flagged it as
+    "⚠ older version" at render time, but the model could still cite it as
+    if it were current.
+
+    Not added to `documents` itself -- it already tracks status. Must be
+    on `embeddings` too (see vector_store/sqlite_store.py's own migration)
+    because filters.py emits a bare "doc_status" column name that the
+    dense query resolves directly against `embeddings`, not `chunks`.
+    """
+    _ensure_column(cursor, "chunks", "doc_status", "TEXT DEFAULT 'active'")
+    cursor.execute("""
+        UPDATE chunks SET doc_status = 'superseded'
+        WHERE doc_status != 'superseded'
+          AND doc_id IN (SELECT doc_id FROM documents WHERE status = 'superseded')
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_chunks_doc_status ON chunks(doc_status)"
     )
 
 

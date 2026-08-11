@@ -208,24 +208,40 @@ class TestAccessHierarchy:
 
 class TestFilterBuilder:
     def test_public_role_single_eq(self):
+        # Phase 6: doc_status="active" is now an unconditional second
+        # condition alongside RBAC, so even a single-role query produces
+        # $and rather than a bare condition.
         where = FilterBuilder(role="Public").build()
-        assert where == {"access_level": {"$eq": "Public"}}
+        assert "$and" in where
+        keys = {list(c.keys())[0] for c in where["$and"]}
+        assert keys == {"access_level", "doc_status"}
+        for c in where["$and"]:
+            if "access_level" in c:
+                assert c["access_level"] == {"$eq": "Public"}
+            if "doc_status" in c:
+                assert c["doc_status"] == {"$eq": "active"}
 
-    def test_admin_no_filters_returns_none(self):
+    def test_admin_no_filters_still_excludes_superseded(self):
+        # Previously Admin-with-no-filters returned None (unfiltered).
+        # Phase 6: superseded documents are excluded for every role,
+        # Admin included -- there is no longer a truly unfiltered case.
         where = FilterBuilder(role="Admin").build()
-        assert where is None
+        assert where == {"doc_status": {"$eq": "active"}}
 
     def test_admin_with_department_returns_condition(self):
         where = FilterBuilder(
             role="Admin",
             filters=RetrievalFilter(department="Admissions")
         ).build()
-        assert where == {"department": {"$eq": "Admissions"}}
+        assert "$and" in where
+        keys = {list(c.keys())[0] for c in where["$and"]}
+        assert keys == {"doc_status", "department"}
 
     def test_faculty_uses_dollar_in(self):
         where = FilterBuilder(role="Faculty").build()
-        assert "$in" in where["access_level"]
-        assert "Admin" not in where["access_level"]["$in"]
+        access_cond = next(c["access_level"] for c in where["$and"] if "access_level" in c)
+        assert "$in" in access_cond
+        assert "Admin" not in access_cond["$in"]
 
     def test_department_filter_combined_with_rbac(self):
         where = FilterBuilder(

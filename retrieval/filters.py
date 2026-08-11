@@ -63,9 +63,10 @@ class FilterBuilder:
         where = FilterBuilder(role="Student", filters=query.filters).build()
         results = store.query_with_filter(embedding, where, n_results=10)
 
-    The build() method returns None only when Admin queries with no metadata
-    filters — in that case the store can skip the where evaluation entirely,
-    which is a meaningful performance hint.
+    build() always returns at least a doc_status="active" constraint now
+    (superseded documents are excluded for every role, not just filtered by
+    RBAC), so it never returns None -- there is no unfiltered case left to
+    skip evaluation for.
     """
 
     def __init__(self, role: str, filters: Optional[RetrievalFilter] = None) -> None:
@@ -74,10 +75,10 @@ class FilterBuilder:
 
     def build(self) -> Optional[dict]:
         """
-        Returns a metadata where dict, or None if no filtering is needed.
-
-        None is only returned for Admin role with no metadata filters — every
-        other case produces at least the RBAC access_level constraint.
+        Returns a metadata where dict. Never None (see class docstring) --
+        doc_status is an unconditional constraint, so there is always at
+        least one condition. Return type stays Optional[dict] for callers
+        that pass it straight to query_with_filter(where_clause: Optional[dict]).
         """
         conditions: list[dict] = []
 
@@ -94,6 +95,16 @@ class FilterBuilder:
         if rbac_condition:
             conditions.append(rbac_condition)
 
+        # --- Superseded documents are never retrievable, for any role ---
+        # An old-version SOP shouldn't answer a chat question just because
+        # an Admin is asking -- this is unrelated to RBAC (who can see what)
+        # and applies unconditionally. Previously mark_document_superseded
+        # only flipped documents.status, which nothing in retrieval read;
+        # a superseded document stayed fully citable forever, with only a
+        # cosmetic "⚠ older version" flag at citation-render time. See
+        # ledger.mark_document_superseded and vector_store/sqlite_store.py.
+        conditions.append({"doc_status": {"$eq": "active"}})
+
         # --- Metadata filters ---
         if self._filters.department:
             conditions.append({"department": {"$eq": self._filters.department}})
@@ -108,8 +119,6 @@ class FilterBuilder:
             conditions.append({"version": {"$eq": self._filters.version}})
 
         # --- Combine ---
-        if not conditions:
-            return None              # Admin, no metadata filters → unfiltered
         if len(conditions) == 1:
             return conditions[0]    # Single condition — no $and wrapper needed
         return {"$and": conditions}
