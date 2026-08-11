@@ -522,9 +522,16 @@ function msgHTML(msg) {
     count = msg.sources.length;
     items = msg.sources.map(s => `<div class="si"><span class="ic">${I.doc}</span>${esc(s)}</div>`).join('');
   }
+  // citationsInferred: the answer emitted no [SOURCE N] markers, so these
+  // are the top-ranked chunks shown to the model rather than sources it
+  // actually cited -- labeled distinctly so the panel doesn't overstate
+  // what the answer is actually grounded in.
+  const srcLabel = msg.citationsInferred
+    ? `${count} related source${count > 1 ? 's' : ''}`
+    : `${count} source${count > 1 ? 's' : ''}`;
   const srcs = count ? `
     <div class="sources">
-      <div class="sh" onclick="this.nextElementSibling.classList.toggle('open')">${I.doc} ${count} source${count > 1 ? 's' : ''} ${I.chevron}</div>
+      <div class="sh" onclick="this.nextElementSibling.classList.toggle('open')">${I.doc} ${srcLabel} ${I.chevron}</div>
       <div class="sl">${items}</div>
     </div>` : '';
   const confVal = msg.confidence || (msg.isUser ? "" : extractConfidence(msg.content));
@@ -613,10 +620,20 @@ async function sendMsg() {
           try {
             const meta = JSON.parse(data.slice(6));
             ensureBubble();
+            // The streamed text has [SOURCE N] markers suppressed, not
+            // resolved (their final rank isn't known mid-stream -- see
+            // rag_pipeline._SourceMarkerSuppressor). answer_with_refs is
+            // the authoritative final text with real [N] refs, so it
+            // replaces the streamed content now that citations are known
+            // -- matching what the non-streaming API would have returned
+            // for the same question, refs included.
+            if (meta.answer_with_refs) S.messages[botIdx].content = meta.answer_with_refs;
             S.messages[botIdx].sources = meta.source_documents || [];
             S.messages[botIdx].citations = meta.citations || [];
+            S.messages[botIdx].citationsInferred = !!meta.citations_inferred;
             S.messages[botIdx].confidence = meta.confidence || "";
             if (meta.session_id) S.sessionId = meta.session_id;
+            liveUpdate();
           } catch {}
           continue;
         }

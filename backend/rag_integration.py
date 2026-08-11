@@ -59,6 +59,7 @@ def query(question: str, role: str) -> dict:
 
         citations_list = [
             {
+                "rank":         c.rank,
                 "doc_id":       c.doc_id,
                 "display_name": c.display_name,
                 "department":   c.department,
@@ -79,9 +80,11 @@ def query(question: str, role: str) -> dict:
             "formatted_answer":   resp.formatted_answer,
             "source_documents":   source_documents,
             "citations":          citations_list,
+            "citations_inferred": resp.citations_inferred,
             "confidence":         resp.confidence,
             "confidence_score":   round(resp.confidence_score, 4),
             "retrieval_mode":     resp.retrieval_mode,
+            "rerank_method":      resp.rerank_method,
             "processing_time_ms": round(resp.processing_time_ms, 1),
             "retrieval_time_ms":  round(resp.retrieval_time_ms, 1),
             "generation_time_ms": round(resp.generation_time_ms, 1),
@@ -99,9 +102,11 @@ def query(question: str, role: str) -> dict:
             "formatted_answer":   "The knowledge base is temporarily unavailable. Please try again shortly.",
             "source_documents":   [],
             "citations":          [],
+            "citations_inferred": False,
             "confidence":         "0%",
             "confidence_score":   0.0,
             "retrieval_mode":     "error",
+            "rerank_method":      None,
             "processing_time_ms": 0.0,
             "retrieval_time_ms":  0.0,
             "generation_time_ms": 0.0,
@@ -142,13 +147,18 @@ def stream_structured(question: str, role: str) -> Iterator[tuple]:
         yield from get_pipeline().run_stream_structured(question, role)
     except Exception as exc:
         logger.error("[RAG_INTEGRATION] run_stream_structured() failed: %s", exc, exc_info=True)
-        yield ("token", "The knowledge base is temporarily unavailable. Please try again shortly.")
+        error_text = "The knowledge base is temporarily unavailable. Please try again shortly."
+        yield ("token", error_text)
         yield ("meta", {
-            "answer":             "The knowledge base is temporarily unavailable. Please try again shortly.",
+            "answer":             error_text,
+            "answer_with_refs":   error_text,
+            "formatted_answer":   error_text,
             "source_documents":   [],
             "citations":          [],
+            "citations_inferred": False,
             "confidence":         "0%",
             "confidence_score":   0.0,
             "retrieval_mode":     "error",
+            "rerank_method":      None,
             "processing_time_ms": 0.0,
         })

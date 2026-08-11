@@ -32,8 +32,30 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Matches [SOURCE 1], [SOURCE 12], [source 3] in generated answers
-_SOURCE_RE = re.compile(r"\[SOURCE\s+(\d+)\]", re.IGNORECASE)
+# Matches [SOURCE 1], [SOURCE 12], [source 3], AND the bundled form the
+# model sometimes emits instead of one marker per citation --
+# [SOURCE 1, SOURCE 2, SOURCE 3]. A pattern matching only a single number
+# per bracket (the original version of this regex) doesn't recognize the
+# bundled form at all, so it passes through unresolved and unsuppressed --
+# caught live: a real answer ended with "...late returns
+# [SOURCE 1, SOURCE 2, SOURCE 3]." and that raw text reached the client
+# verbatim, both mid-stream and in the final formatted_answer.
+_SOURCE_GROUP_RE = re.compile(
+    r"\[\s*SOURCE\s+\d+(?:\s*,\s*SOURCE\s+\d+)*\s*\]", re.IGNORECASE,
+)
+_SOURCE_NUM_RE = re.compile(r"\d+")
+
+
+def _extract_source_numbers(marker_text: str) -> list[int]:
+    """All source numbers inside one [SOURCE N] or [SOURCE N, SOURCE M, ...] marker."""
+    return [int(n) for n in _SOURCE_NUM_RE.findall(marker_text)]
+
+
+# When the answer emits no valid [SOURCE N] markers at all, cite this many
+# top-ranked chunks that were actually placed in the prompt, flagged via
+# CitationList.citations_inferred so the UI can label them accordingly
+# rather than claiming the answer cited them.
+CITATION_FALLBACK_TOP_N = 2
 
 
 # ---------------------------------------------------------------------------
@@ -66,17 +88,42 @@ class CitationEngine:
         self,
         results: "list[RetrievalResult]",
         answer:  str,
+        source_index: "Optional[dict[int, str]]" = None,
     ) -> CitationList:
         """
         Build a CitationList from retrieval results and the generated answer.
 
+        Strict by default: citations are built only from documents the
+        answer actually referenced via [SOURCE N], ranked by first
+        appearance in the text -- not from every retrieved chunk regardless
+        of use. Previously this grouped and cited *all* of `results`
+        unconditionally, so "Sources:" was effectively a retrieval dump; an
+        answer that referenced nothing (or referenced the wrong thing)
+        still shipped a full citation list, which is how the recorded
+        baseline case shipped four citations to unrelated departments on a
+        question the model correctly said it couldn't answer.
+
         Args:
             results: list[RetrievalResult] from Retriever.retrieve().
             answer:  Generated answer string from RAGEngine.generate().
+            source_index: {source_number: chunk_id} exactly as shown to the
+                model in the prompt (BuiltPrompt.context_chunks). Without
+                this, [SOURCE N] is assumed to number `results` positionally
+                from 1 -- correct only when nothing was filtered or
+                reordered between retrieval and the prompt. With
+                `max_chunks`/budget trimming or confidence_threshold
+                filtering in play, that assumption silently desyncs
+                (prompt_builder renumbers *after* filtering), so callers
+                that have a BuiltPrompt should always pass this.
 
         Returns:
-            CitationList with sorted, deduplicated Citations and an
-            annotated answer where [SOURCE N] → [N].
+            CitationList with citations in first-referenced order (or, if
+            the answer emitted no valid markers, the top
+            CITATION_FALLBACK_TOP_N chunks actually shown to the model,
+            flagged via citations_inferred) and an annotated answer where
+            [SOURCE N] → [N] for real citations and hallucinated markers
+            (referencing a source number never shown to the model) are
+            stripped rather than left as raw text.
         """
         if not results:
             return CitationList(
@@ -86,8 +133,72 @@ class CitationEngine:
                 total_citations  = 0,
             )
 
+        chunk_to_doc = {r.chunk_id: r.citation.doc_id for r in results}
+
+        if source_index:
+            source_to_doc = {n: chunk_to_doc.get(cid) for n, cid in source_index.items()}
+        else:
+            # No prompt-derived mapping available -- fall back to
+            # positional numbering in the order results were passed in.
+            # This is only correct when the caller's [SOURCE N] numbering
+            # matches this exact list, which is the assumption a
+            # source_index argument exists to remove.
+            source_to_doc = {i: r.citation.doc_id for i, r in enumerate(results, start=1)}
+
+        referenced: list[int] = []
+        for m in _SOURCE_GROUP_RE.finditer(answer):
+            referenced.extend(_extract_source_numbers(m.group(0)))
+        cited_doc_ids: list[str] = []
+        hallucinated_numbers: set[int] = set()
+        for n in referenced:
+            doc_id = source_to_doc.get(n)
+            if doc_id is None:
+                hallucinated_numbers.add(n)
+                continue
+            if doc_id not in cited_doc_ids:
+                cited_doc_ids.append(doc_id)
+
+        citations_inferred = False
+        if cited_doc_ids:
+            # Strict mode: exactly what the answer referenced, ranked by
+            # first appearance in the text -- reading order, not score
+            # order, since that's what a reader actually encounters.
+            selected_results = [r for r in results if r.citation.doc_id in cited_doc_ids]
+            order_key = {doc_id: i for i, doc_id in enumerate(cited_doc_ids)}
+        else:
+            # No valid markers. Cite the top CITATION_FALLBACK_TOP_N chunks
+            # that were actually in the prompt (source_index's values), not
+            # the full retrieval set -- results can hold more candidates
+            # than made it past max_chunks/the char budget, and citing one
+            # the model never saw would misrepresent what it read.
+            pool = results
+            if source_index:
+                shown_chunk_ids = set(source_index.values())
+                pool = [r for r in results if r.chunk_id in shown_chunk_ids]
+            # Sorted by effective score (display_name as a deterministic
+            # tiebreak) rather than trusting input order -- `results` is
+            # score-ranked coming from the retriever in production, but
+            # this keeps "top" meaning top regardless of what order a
+            # caller passes, and ties resolve the same way every run.
+            pool = sorted(
+                pool,
+                key=lambda r: (
+                    -(r.rerank_score if r.rerank_score is not None else r.score),
+                    r.citation.display_name.lower(),
+                ),
+            )
+            top_doc_ids: list[str] = []
+            for r in pool:
+                if r.citation.doc_id not in top_doc_ids:
+                    top_doc_ids.append(r.citation.doc_id)
+                if len(top_doc_ids) >= CITATION_FALLBACK_TOP_N:
+                    break
+            selected_results = [r for r in pool if r.citation.doc_id in top_doc_ids]
+            order_key = {doc_id: i for i, doc_id in enumerate(top_doc_ids)}
+            citations_inferred = True
+
         # 1. Merge chunks that belong to the same document
-        groups = self._group_by_doc(results)
+        groups = self._group_by_doc(selected_results)
 
         # 2. Build a Citation per unique doc_id
         raw_citations = [
@@ -98,8 +209,10 @@ class CitationEngine:
         # 3. Flag superseded versions (same SOP, different version)
         raw_citations = self._resolve_versions(raw_citations)
 
-        # 4. Sort: score desc, display_name asc for ties
-        raw_citations = self._sort(raw_citations)
+        # 4. Order by first-appearance (strict) or top-score (fallback) --
+        # see order_key above. Not _sort()'s score-descending order: in
+        # strict mode, citation order should match reading order.
+        raw_citations.sort(key=lambda c: order_key.get(c.doc_id, len(order_key)))
 
         # 5. Assign 1-based ranks and inline refs
         citations = self._assign_ranks(raw_citations)
@@ -111,25 +224,39 @@ class CitationEngine:
             )
 
         # 6. Build source_number → rank map for inline ref injection
-        source_map = self._build_source_map(results, citations)
+        doc_rank = {c.doc_id: c.rank for c in citations}
+        source_map = {
+            n: doc_rank[doc_id]
+            for n, doc_id in source_to_doc.items()
+            if doc_id is not None and doc_id in doc_rank
+        }
 
-        # 7. Replace [SOURCE N] in answer
+        # 7. Replace [SOURCE N] in answer; strip hallucinated markers
         answer_with_refs = _inject_inline_refs(answer, source_map)
 
         has_conflicts = any(not c.is_latest_version for c in citations)
 
+        if hallucinated_numbers:
+            logger.warning(
+                "[CITATION] %d hallucinated [SOURCE N] marker(s) in answer "
+                "(referenced a source number never shown to the model): %s",
+                len(hallucinated_numbers), sorted(hallucinated_numbers),
+            )
+
         logger.debug(
-            "[CITATION] %d results → %d citations | conflicts=%s",
-            len(results), len(citations), has_conflicts,
+            "[CITATION] %d results -> %d citations | inferred=%s | conflicts=%s",
+            len(results), len(citations), citations_inferred, has_conflicts,
         )
 
         return CitationList(
-            citations             = citations,
-            answer_with_refs      = answer_with_refs,
-            original_answer       = answer,
-            total_citations       = len(citations),
-            has_version_conflicts = has_conflicts,
-            source_number_map     = {str(k): v for k, v in source_map.items()},
+            citations                 = citations,
+            answer_with_refs          = answer_with_refs,
+            original_answer           = answer,
+            total_citations           = len(citations),
+            has_version_conflicts     = has_conflicts,
+            source_number_map         = {str(k): v for k, v in source_map.items()},
+            citations_inferred        = citations_inferred,
+            hallucinated_marker_count = len(hallucinated_numbers),
         )
 
     # ------------------------------------------------------------------
@@ -344,30 +471,6 @@ class CitationEngine:
             ranked.append(c.model_copy(update={"rank": i, "inline_ref": f"[{i}]"}))
         return ranked
 
-    # ------------------------------------------------------------------
-    # Step 6: Build source_number → rank map
-    # ------------------------------------------------------------------
-
-    def _build_source_map(
-        self,
-        results:   "list[RetrievalResult]",
-        citations: list[Citation],
-    ) -> dict[int, int]:
-        """
-        Maps each original [SOURCE N] number (1-based, from the prompt) to
-        the citation rank after merge + sort.
-        """
-        # doc_id → rank lookup
-        doc_rank: dict[str, int] = {c.doc_id: c.rank for c in citations}
-
-        source_map: dict[int, int] = {}
-        for i, r in enumerate(results, start=1):
-            doc_id = r.citation.doc_id
-            if doc_id in doc_rank:
-                source_map[i] = doc_rank[doc_id]
-
-        return source_map
-
 
 # ---------------------------------------------------------------------------
 # Pure helpers
@@ -375,15 +478,27 @@ class CitationEngine:
 
 def _inject_inline_refs(answer: str, source_map: dict[int, int]) -> str:
     """
-    Replaces [SOURCE N] with [rank] in the answer text.
-    Unknown source numbers are left as-is.
+    Replaces each [SOURCE N] (or bundled [SOURCE N, SOURCE M, ...]) marker
+    with [rank] / [rank1, rank2, ...] in the answer text.
+
+    Any number not in source_map -- a hallucinated marker referencing a
+    source that was never shown to the model, or a real source that wasn't
+    among the ones ultimately selected -- is dropped from its group rather
+    than left as raw "SOURCE 9" text. If every number in a bundled marker
+    is unresolved, the whole bracket is stripped. Previously every
+    unresolved number was left verbatim, and a bundled marker wasn't even
+    recognized by the single-number pattern this replaced.
     """
     def _replace(m: re.Match) -> str:
-        n    = int(m.group(1))
-        rank = source_map.get(n)
-        return f"[{rank}]" if rank is not None else m.group(0)
+        nums = _extract_source_numbers(m.group(0))
+        ranks: list[int] = []
+        for n in nums:
+            rank = source_map.get(n)
+            if rank is not None and rank not in ranks:
+                ranks.append(rank)
+        return f"[{', '.join(str(r) for r in ranks)}]" if ranks else ""
 
-    return _SOURCE_RE.sub(_replace, answer)
+    return _SOURCE_GROUP_RE.sub(_replace, answer)
 
 
 def _extract_display_name(display_citation: str) -> str:

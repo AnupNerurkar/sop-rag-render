@@ -274,9 +274,22 @@ class RAGPipelineResponse(BaseModel):
         default="unknown",
         description="'dense' | 'hybrid' | 'dense+rerank' | 'hybrid+rerank'",
     )
+    rerank_method: Optional[str] = Field(
+        default=None,
+        description="'groq_listwise' if reranking actually happened; None otherwise.",
+    )
+    citations_inferred: bool = Field(
+        default=False,
+        description=(
+            "True when the model emitted no valid [SOURCE N] markers and "
+            "the citations shown are inferred (top-ranked chunks actually "
+            "in the prompt) rather than read off the answer text. The UI "
+            "should label these as 'related sources', not as cited."
+        ),
+    )
     model_name: str = Field(
         default="",
-        description="Ollama model name that generated the answer.",
+        description="Name of the model that generated the answer (see rag/rag_engine.py for the active backend).",
     )
     template_used: str = Field(
         default="default",

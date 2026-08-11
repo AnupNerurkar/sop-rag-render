@@ -172,10 +172,14 @@ class TestInjectInlineRefs:
         result = _inject_inline_refs(answer, {1: 1, 3: 1})
         assert result == "[1] also confirmed by [1]."
 
-    def test_unknown_source_left_as_is(self):
+    def test_unknown_source_stripped(self):
+        # Phase 5: an unresolved marker (referencing a source that was
+        # never shown to the model) is stripped entirely rather than left
+        # as raw "[SOURCE 99]" text leaking into what the user reads.
         answer = "Check [SOURCE 99] for more."
         result = _inject_inline_refs(answer, {1: 1})
-        assert "[SOURCE 99]" in result
+        assert "[SOURCE 99]" not in result
+        assert "Check  for more." == result
 
     def test_case_insensitive(self):
         answer = "See [source 1] and [Source 2]."
@@ -189,6 +193,28 @@ class TestInjectInlineRefs:
 
     def test_empty_answer(self):
         assert _inject_inline_refs("", {}) == ""
+
+    def test_bundled_marker_resolved(self):
+        # Caught live: the model doesn't always emit one marker per
+        # citation -- it sometimes bundles several into a single bracket.
+        # The original single-number pattern didn't recognize this form at
+        # all, so it passed through completely unresolved.
+        answer = "...late returns [SOURCE 1, SOURCE 2, SOURCE 3]."
+        result = _inject_inline_refs(answer, {1: 1, 2: 2, 3: 1})
+        # ranks 1 and 2 (deduped, 3 also maps to rank 1)
+        assert result == "...late returns [1, 2]."
+
+    def test_bundled_marker_partially_hallucinated(self):
+        # One number in the bundle resolves, one doesn't -- keep the real
+        # one, drop the fake one, not the whole bracket.
+        answer = "[SOURCE 1, SOURCE 99] confirm this."
+        result = _inject_inline_refs(answer, {1: 1})
+        assert result == "[1] confirm this."
+
+    def test_bundled_marker_all_hallucinated_stripped(self):
+        answer = "[SOURCE 98, SOURCE 99] confirm this."
+        result = _inject_inline_refs(answer, {1: 1})
+        assert result == " confirm this."
 
 
 # ===========================================================================
@@ -437,8 +463,12 @@ class TestSortAndDeterminism:
                          display_name=f"Doc {chr(65+i)}", department=f"D{i}")
             for i in range(3)
         ]
+        # "answer" has no [SOURCE N] markers -> fallback mode, capped at
+        # CITATION_FALLBACK_TOP_N (2) rather than citing all 3 retrieved
+        # documents regardless of whether the answer used them.
         cl = engine.build(results, "answer")
-        assert [c.rank for c in cl.citations] == [1, 2, 3]
+        assert [c.rank for c in cl.citations] == [1, 2]
+        assert cl.citations_inferred is True
 
 
 # ===========================================================================

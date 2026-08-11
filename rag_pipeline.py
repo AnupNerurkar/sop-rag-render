@@ -79,6 +79,85 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Streaming [SOURCE N] suppression
+# ---------------------------------------------------------------------------
+
+# Matches [SOURCE 1] and the bundled form the model sometimes emits instead
+# of one marker per citation -- [SOURCE 1, SOURCE 2, SOURCE 3]. Shared with
+# rag/citation_engine.py (which actually resolves markers into citations)
+# rather than duplicated, so the two can't drift out of sync the way a
+# narrower single-number version of this regex once did here.
+from rag.citation_engine import _SOURCE_GROUP_RE as _SOURCE_MARKER_RE
+
+
+class _SourceMarkerSuppressor:
+    """
+    Holds back [SOURCE N] markers from the live token stream.
+
+    Citation ranks aren't known until the complete answer exists -- ranking
+    is by first appearance across the *whole* text (see rag/citation_
+    engine.py), and a fallback path can replace the citation set entirely
+    if no valid markers turn up at all. A marker shown live would have to
+    be either meaningless raw "[SOURCE 3]" text or promise a rank that
+    might not hold, so it's suppressed entirely rather than shown and
+    corrected after the fact -- previously the streamed answer showed raw
+    [SOURCE N] text throughout, while the non-streamed path showed [1],
+    [2] from the start.
+
+    Buffering is bounded: at most a few characters are ever held back
+    waiting to see whether a '[' is the start of a real marker, and an
+    unreasonably long unterminated "[SOURCE..." (not a real marker) is
+    flushed as plain text rather than buffered forever.
+    """
+
+    _PREFIX = "[SOURCE"
+    _MAX_UNTERMINATED = 32
+
+    def __init__(self) -> None:
+        self._pending = ""
+
+    def feed(self, token: str) -> str:
+        self._pending += token
+        out = []
+        while True:
+            start = self._pending.find("[")
+            if start == -1:
+                out.append(self._pending)
+                self._pending = ""
+                break
+            out.append(self._pending[:start])
+            tail = self._pending[start:]
+            upper_tail = tail.upper()
+            prefix_len = min(len(upper_tail), len(self._PREFIX))
+            if upper_tail[:prefix_len] != self._PREFIX[:prefix_len]:
+                out.append(tail[0])
+                self._pending = tail[1:]
+                continue
+            if len(tail) < len(self._PREFIX):
+                self._pending = tail
+                break
+            close = tail.find("]")
+            if close == -1:
+                if len(tail) > self._MAX_UNTERMINATED:
+                    out.append(tail)
+                    self._pending = ""
+                else:
+                    self._pending = tail
+                break
+            marker = tail[:close + 1]
+            if not _SOURCE_MARKER_RE.fullmatch(marker):
+                out.append(marker)
+            self._pending = tail[close + 1:]
+        return "".join(out)
+
+    def flush(self) -> str:
+        """Call once the stream ends -- anything left was never a complete marker."""
+        remaining = self._pending
+        self._pending = ""
+        return remaining
+
+
+# ---------------------------------------------------------------------------
 # Role normalisation
 # ---------------------------------------------------------------------------
 
@@ -317,7 +396,8 @@ class RAGPipeline:
         # ---- Phase 4: Citation Engine -----------------------------------
         from rag.citation_engine import get_citation_engine
         confidence, conf_score = compute_confidence(results)
-        citation_list = get_citation_engine().build(results, rag_response.answer)
+        source_index = {c.source_number: c.chunk_id for c in built_prompt.context_chunks}
+        citation_list = get_citation_engine().build(results, rag_response.answer, source_index)
 
         # ---- Assemble structured response --------------------------------
         sources_block          = format_sources_block(citation_list.citations)
@@ -342,6 +422,8 @@ class RAGPipeline:
             confidence           = confidence,
             confidence_score     = round(conf_score, 6),
             retrieval_mode       = retrieval_response.retrieval_mode,
+            rerank_method        = retrieval_response.rerank_method,
+            citations_inferred   = citation_list.citations_inferred,
             model_name           = rag_response.model_name,
             template_used        = rag_response.template_used,
             has_conflicts        = built_prompt.has_conflicts,
@@ -412,12 +494,19 @@ class RAGPipeline:
         SSE endpoint can paint tokens immediately and still emit a final
         metadata event:
 
-            ("token", "<text chunk>")   -- repeated, as Qwen emits them
-            ("meta",  {... citations, confidence, answer, timing ...})  -- once
+            ("token", "<text chunk>")   -- repeated, as the model emits them,
+                                           with [SOURCE N] markers suppressed
+                                           (see _SourceMarkerSuppressor)
+            ("meta",  {... citations, confidence, answer_with_refs,
+                        formatted_answer, timing ...})               -- once
 
-        The full answer is accumulated as tokens arrive, so citations are
-        built from the complete text after generation finishes — identical
-        output to run(), just delivered live.
+        The full raw answer is accumulated as tokens arrive, so citations
+        are built from the complete text after generation finishes --
+        byte-identical output to run() for the same inputs, just delivered
+        live. The client should replace the streamed bubble content with
+        meta.formatted_answer once this event arrives, since the streamed
+        text has [SOURCE N] markers removed rather than resolved (their
+        final rank isn't known until now).
         """
         cfg          = config_overrides or self._config
         role         = _normalize_role(role)
@@ -437,11 +526,15 @@ class RAGPipeline:
             yield ("token", FALLBACK_ANSWER)
             yield ("meta", {
                 "answer":             FALLBACK_ANSWER,
+                "answer_with_refs":   FALLBACK_ANSWER,
+                "formatted_answer":   FALLBACK_ANSWER,
                 "source_documents":   [],
                 "citations":          [],
+                "citations_inferred": False,
                 "confidence":         "0%",
                 "confidence_score":   0.0,
                 "retrieval_mode":     retrieval_response.retrieval_mode,
+                "rerank_method":      None,
                 "processing_time_ms": round(wall_ms, 2),
             })
             return
@@ -450,9 +543,15 @@ class RAGPipeline:
         from rag.rag_engine     import get_rag_engine
 
         built_prompt = build_prompt(question, results, cfg.to_prompt_config())
+        source_index = {c.source_number: c.chunk_id for c in built_prompt.context_chunks}
 
-        # ---- Stream tokens live, accumulating the full answer ----------
+        # ---- Stream tokens live, accumulating the full RAW answer ------
+        # `chunks` accumulates the unsuppressed text (citations must be
+        # built from the real [SOURCE N] markers); `suppressor` filters
+        # what actually reaches the client so a marker never appears live
+        # with a rank that isn't final yet -- see _SourceMarkerSuppressor.
         chunks: list[str] = []
+        suppressor = _SourceMarkerSuppressor()
         for token in get_rag_engine().generate_stream(
             built_prompt,
             temperature    = cfg.temperature,
@@ -461,21 +560,26 @@ class RAGPipeline:
             repeat_penalty = cfg.repeat_penalty,
         ):
             chunks.append(token)
-            yield ("token", token)
+            visible = suppressor.feed(token)
+            if visible:
+                yield ("token", visible)
+        trailing = suppressor.flush()
+        if trailing:
+            yield ("token", trailing)
 
         full_answer = "".join(chunks).strip() or FALLBACK_ANSWER
 
-        # ---- Citations + confidence from the complete answer -----------
+        # ---- Citations + confidence from the complete RAW answer -------
         # confidence is a retrieval signal (see response_schema.
         # compute_confidence) -- it doesn't depend on the generated text,
-        # so it's identical whether computed here or in run(). Passing
-        # full_answer into it would have been meaningless anyway; the old
-        # parse_llm_confidence only used the answer text to scrape a
-        # self-reported number the model no longer writes.
+        # so it's identical whether computed here or in run().
         from rag.citation_engine import get_citation_engine
-        citation_list          = get_citation_engine().build(results, full_answer)
-        confidence, conf_score = compute_confidence(results)
-        wall_ms                = (time.perf_counter() - t_wall_start) * 1000
+        citation_list           = get_citation_engine().build(results, full_answer, source_index)
+        confidence, conf_score  = compute_confidence(results)
+        wall_ms                 = (time.perf_counter() - t_wall_start) * 1000
+
+        sources_block     = format_sources_block(citation_list.citations)
+        formatted_answer  = citation_list.answer_with_refs + sources_block
 
         citations_payload = [
             {
@@ -493,14 +597,24 @@ class RAGPipeline:
             for c in citation_list.citations
         ]
 
+        # answer_with_refs / formatted_answer are the authoritative final
+        # text -- byte-identical to what run() would produce for the same
+        # inputs. The client replaces the streamed (marker-suppressed)
+        # bubble content with formatted_answer once this meta event
+        # arrives, so what the user reads after [DONE] always matches the
+        # non-streaming API exactly, refs and Sources block included.
         yield ("meta", {
-            "answer":             full_answer,
-            "source_documents":   [c.display_name for c in citation_list.citations],
-            "citations":          citations_payload,
-            "confidence":         confidence,
-            "confidence_score":   round(conf_score, 4),
-            "retrieval_mode":     retrieval_response.retrieval_mode,
-            "processing_time_ms": round(wall_ms, 2),
+            "answer":              full_answer,
+            "answer_with_refs":    citation_list.answer_with_refs,
+            "formatted_answer":    formatted_answer,
+            "source_documents":    [c.display_name for c in citation_list.citations],
+            "citations":           citations_payload,
+            "citations_inferred":  citation_list.citations_inferred,
+            "confidence":          confidence,
+            "confidence_score":    round(conf_score, 4),
+            "retrieval_mode":      retrieval_response.retrieval_mode,
+            "rerank_method":       retrieval_response.rerank_method,
+            "processing_time_ms":  round(wall_ms, 2),
         })
 
     # ------------------------------------------------------------------

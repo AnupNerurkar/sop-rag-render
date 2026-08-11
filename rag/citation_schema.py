@@ -141,6 +141,18 @@ class CitationList(BaseModel):
     total_citations:       int  = Field(default=0)
     has_version_conflicts: bool = Field(default=False,
         description="True when any citation is superseded by a newer version in the same set.")
+    citations_inferred: bool = Field(default=False,
+        description=(
+            "True when the answer emitted no valid [SOURCE N] markers and these "
+            "citations were inferred (top-ranked chunks actually shown to the "
+            "model) rather than read directly off the answer text. The UI should "
+            "label these differently -- e.g. 'related sources' rather than "
+            "claiming the answer cited them."
+        ))
+    hallucinated_marker_count: int = Field(default=0,
+        description="[SOURCE N] markers in the raw answer that referenced a source "
+                     "number never shown to the model. Stripped from answer_with_refs; "
+                     "a nonzero count here is a hallucination signal worth logging.")
 
     # Internal: source_number (1-based from [SOURCE N]) → citation rank
     # Stored as dict[str, int] because Pydantic serialises int keys as strings in JSON.

@@ -395,9 +395,13 @@ def chat_authenticated(
 
     result = rag_query(question=payload.query, role=current_user.role)
 
+    # Persist answer_with_refs (real [N] citations), not the raw answer --
+    # matches the streaming path's history persistence (see
+    # _sse_auth_generator) so history reads identically regardless of
+    # which endpoint produced it.
     db.add(ChatMessage(
         username=current_user.username, session_id=sid,
-        content=result["answer"], is_user=False,
+        content=result.get("answer_with_refs") or result["answer"], is_user=False,
         sources=json.dumps(result["source_documents"]),
     ))
     db.commit()
@@ -432,9 +436,13 @@ def _sse_public_generator(question: str, role: str):
     meta = json.dumps({
         "source_documents":   final_meta.get("source_documents", []),
         "citations":          final_meta.get("citations", []),
+        "citations_inferred": final_meta.get("citations_inferred", False),
+        "answer_with_refs":   final_meta.get("answer_with_refs", ""),
+        "formatted_answer":   final_meta.get("formatted_answer", ""),
         "confidence":         final_meta.get("confidence", "UNKNOWN"),
         "confidence_score":   final_meta.get("confidence_score", 0.0),
         "retrieval_mode":     final_meta.get("retrieval_mode", ""),
+        "rerank_method":      final_meta.get("rerank_method"),
         "processing_time_ms": final_meta.get("processing_time_ms", 0.0),
     })
     yield f"data: [META]{meta}\n\n"
@@ -443,18 +451,21 @@ def _sse_public_generator(question: str, role: str):
 
 def _sse_auth_generator(question: str, role: str, username: str, session_id: str):
     """
-    Authenticated SSE: streams Qwen tokens LIVE, then saves history and emits
+    Authenticated SSE: streams tokens LIVE, then saves history and emits
     citations/confidence as a final metadata event.
 
     Previously this blocked on a full non-streaming pipeline run before sending
-    anything — on slow hardware that exceeded Ollama's read timeout, so the
+    anything — on slow hardware that exceeded the backend's read timeout, so the
     client only ever saw a blinking cursor that never resolved.  We now consume
     the pipeline's structured stream so the first token paints in seconds and
     the read timeout is reset by every chunk.
 
     Protocol (unchanged):
-      data: <text chunk>              — tokens, as they arrive
-      data: [META]{"answer":...}      — final metadata JSON (citations, confidence)
+      data: <text chunk>              — tokens, as they arrive ([SOURCE N]
+                                         markers suppressed -- see
+                                         rag_pipeline._SourceMarkerSuppressor)
+      data: [META]{"answer":...}      — final metadata JSON (citations, confidence,
+                                         answer_with_refs, formatted_answer)
       data: [DONE]                    — stream complete
     """
     from backend.rag_integration import stream_structured
@@ -473,7 +484,12 @@ def _sse_auth_generator(question: str, role: str, username: str, session_id: str
         yield "data: [DONE]\n\n"
         return
 
-    # Persist to history DB (full accumulated answer from the meta payload)
+    # Persist to history DB. Stores answer_with_refs (real [N] citations,
+    # no unresolved [SOURCE N] text) rather than the raw model output --
+    # previously this stored the raw answer, so history could show
+    # unresolved [SOURCE N] markers a user never saw live (they were
+    # suppressed on the wire) and that the non-streaming API never showed
+    # either.
     try:
         db = SessionLocal()
         db.add(ChatMessage(
@@ -482,7 +498,8 @@ def _sse_auth_generator(question: str, role: str, username: str, session_id: str
         ))
         db.add(ChatMessage(
             username=username, session_id=session_id,
-            content=final_meta.get("answer", ""), is_user=False,
+            content=final_meta.get("answer_with_refs") or final_meta.get("answer", ""),
+            is_user=False,
             sources=json.dumps(final_meta.get("source_documents", [])),
         ))
         db.commit()
@@ -494,9 +511,13 @@ def _sse_auth_generator(question: str, role: str, username: str, session_id: str
     meta = json.dumps({
         "source_documents":   final_meta.get("source_documents", []),
         "citations":          final_meta.get("citations", []),
+        "citations_inferred": final_meta.get("citations_inferred", False),
+        "answer_with_refs":   final_meta.get("answer_with_refs", ""),
+        "formatted_answer":   final_meta.get("formatted_answer", ""),
         "confidence":         final_meta.get("confidence", "UNKNOWN"),
         "confidence_score":   final_meta.get("confidence_score", 0.0),
         "retrieval_mode":     final_meta.get("retrieval_mode", ""),
+        "rerank_method":      final_meta.get("rerank_method"),
         "processing_time_ms": final_meta.get("processing_time_ms", 0.0),
         "session_id":         session_id,
     })
