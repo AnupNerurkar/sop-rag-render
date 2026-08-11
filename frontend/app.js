@@ -1,9 +1,19 @@
 /* ═══════════════════════════════════════════════════════════════════
    EduMind — front-end app logic
    ═══════════════════════════════════════════════════════════════════ */
+/* The API lives in the same FastAPI app that served this page, so same-origin is
+   always the right default: it follows the host the user actually typed, whether
+   that is http://192.168.1.8:8000, http://edumind.lan:8000 or the public
+   https://edumind.buildbox.website. A hardcoded host only ever gets this wrong. */
+const DEFAULT_API = /^https?:$/.test(window.location.protocol) ? window.location.origin : '';
+
 let API = localStorage.getItem('EDUMIND_API_URL');
-if (API === null) {
-  API = 'https://demo-rffq.onrender.com';
+/* Browsers that loaded an older build still carry the retired Render endpoint in
+   localStorage, and a stored value wins over the default — so every request,
+   login included, would keep going to a host that no longer answers. Drop it. */
+if (API === null || API === '' || /onrender\.com/.test(API)) {
+  localStorage.removeItem('EDUMIND_API_URL');
+  API = DEFAULT_API;
 }
 
 function setApiUrl(val) {
