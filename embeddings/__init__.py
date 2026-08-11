@@ -5,7 +5,7 @@ Phase 4: Embedding Generation
 
 Exports:
     BGEEmbedder  — singleton wrapper around BAAI/bge-base-en-v1.5
-    EmbedPipeline — reads chunks from SQLite, embeds, returns ChromaDB payloads
+    EmbedPipeline — reads chunks from SQLite, embeds, returns embedding payloads
 """
 
 from embeddings.embedder import BGEEmbedder, get_embedder

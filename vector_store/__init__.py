@@ -1,14 +1,15 @@
 """
 vector_store/
 -------------
-Phase 5: ChromaDB Vector Store
+Local SQLite vector store and the indexing pipeline that fills it.
 
 Exports:
-    ChromaStore      — persistent ChromaDB client wrapper with RBAC filtering
-    run_indexing     — end-to-end Phase 4+5 orchestrator (embed → upsert → stamp)
+    SQLiteVectorStore — local vector store with RBAC filtering
+    get_vector_store  — process-level singleton accessor
+    run_indexing      — end-to-end orchestrator (embed → upsert → stamp)
 """
 
-from vector_store.chroma_store import ChromaStore, get_chroma_store
+from vector_store.sqlite_store import SQLiteVectorStore, get_vector_store
 from vector_store.index_pipeline import run_indexing
 
-__all__ = ["ChromaStore", "get_chroma_store", "run_indexing"]
+__all__ = ["SQLiteVectorStore", "get_vector_store", "run_indexing"]

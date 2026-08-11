@@ -14,7 +14,7 @@ Key Design Decisions (approved):
   - chunk_id is deterministic: SHA-256(doc_id::chunk_index)[:16].
   - total_chunks is back-filled on all chunks after the full document is split.
   - All chunks are written to the SQLite `chunks` table via ledger.py.
-  - to_embedding_payload() produces ChromaDB-compatible output for Phase 4.
+  - to_embedding_payload() produces embedding-payload output for Phase 4.
 """
 
 from __future__ import annotations
@@ -353,9 +353,9 @@ def run_chunking(doc_records: list[DocumentRecord], doc_texts: dict[str, str]) -
 def get_embedding_payloads(chunks: list[ChunkRecord]) -> list[dict]:
     """
     Converts a list of ChunkRecords into the payload format expected by
-    Phase 4 (Embeddings) and Phase 5 (ChromaDB Indexing).
+    Phase 4 (Embeddings) and Phase 5 (Vector Indexing).
 
     Returns:
-        List of dicts: { "chunk_id", "content", "metadata" (ChromaDB-flat dict) }
+        List of dicts: { "chunk_id", "content", "metadata" (flat dict) }
     """
     return [chunk.to_embedding_payload() for chunk in chunks]

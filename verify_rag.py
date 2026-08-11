@@ -7,7 +7,7 @@ Phase 9: System Verification Script.
 Checks every component of the RAG pipeline independently, then runs
 four end-to-end sample queries and prints detailed results.
 
-READ-ONLY: Never modifies SQLite, ChromaDB, or any document.
+READ-ONLY: Never modifies SQLite, the vector store, or any document.
 
 Run: .venv/Scripts/python.exe verify_rag.py
 """
@@ -170,24 +170,24 @@ def check_sqlite() -> None:
         _RESULTS["SQLite"] = False
 
 
-def check_chromadb() -> None:
-    """Check 6: ChromaDB collection accessible and non-empty."""
-    _section("Check 6 -- ChromaDB")
+def check_vector_store() -> None:
+    """Check 6: vector collection accessible and non-empty."""
+    _section("Check 6 -- the vector store")
     try:
-        from vector_store.chroma_store import get_chroma_store, COLLECTION_NAME
-        store = get_chroma_store()
+        from vector_store.sqlite_store import get_vector_store, COLLECTION_NAME
+        store = get_vector_store()
         stats = store.get_collection_stats()
         count = stats["vector_count"]
         assert count > 0, f"Collection '{COLLECTION_NAME}' is empty"
-        _check("ChromaDB collection non-empty", True,
+        _check("vector collection non-empty", True,
                f"collection={COLLECTION_NAME}  vectors={count}")
         _info("Collection",    COLLECTION_NAME)
         _info("Vector count",  count)
         _info("DB path",       stats["db_path"])
-        _RESULTS["ChromaDB"] = True
+        _RESULTS["the vector store"] = True
     except Exception as exc:
-        _check("ChromaDB collection non-empty", False, str(exc)[:80])
-        _RESULTS["ChromaDB"] = False
+        _check("vector collection non-empty", False, str(exc)[:80])
+        _RESULTS["the vector store"] = False
 
 
 def check_retrieval() -> None:
@@ -438,7 +438,7 @@ def main() -> int:
     check_embedding_model()
     check_reranker()
     check_sqlite()
-    check_chromadb()
+    check_vector_store()
     check_retrieval()
     check_hybrid_reranking()
     check_prompt_builder()

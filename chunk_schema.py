@@ -2,7 +2,7 @@
 chunk_schema.py
 ---------------
 Pydantic data models for Document and Chunk records.
-Used across ingestion_pipeline.py, chunker.py, and future embeddings + ChromaDB phases.
+Used across ingestion_pipeline.py, chunker.py, and future embeddings + the vector store phases.
 
 Access Level Hierarchy (RBAC Foundation):
     Admin   → can access all levels
@@ -157,13 +157,13 @@ class DocumentRecord(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Chunk Metadata (embeds in every chunk, propagated to ChromaDB)
+# Chunk Metadata (embeds in every chunk, propagated to the vector store)
 # ---------------------------------------------------------------------------
 
 class ChunkMetadata(BaseModel):
     """
     Metadata payload attached to every chunk.
-    Propagated in full to ChromaDB metadata dict in Phase 5.
+    Propagated in full to vector-store metadata dict in Phase 5.
     Enables retrieval-time filtering by access_level, category, department, etc.
     """
 
@@ -178,7 +178,7 @@ class ChunkMetadata(BaseModel):
     access_level: str = Field(
         default="Public",
         description="Access tier propagated from parent document. "
-                    "ChromaDB uses this for query-time metadata filtering."
+                    "Used for query-time metadata filtering."
     )
 
     upload_date: str = Field(default="", description="Source document upload/issue date.")
@@ -192,10 +192,10 @@ class ChunkMetadata(BaseModel):
         description="Nearest section heading above this chunk (Word Heading style or SUB-PROCESS marker)."
     )
 
-    def to_chromadb_dict(self) -> dict:
+    def to_metadata_dict(self) -> dict:
         """
-        Returns a flat dict compatible with ChromaDB metadata storage.
-        ChromaDB only supports str / int / float / bool values — no nested objects.
+        Returns a flat dict compatible with vector-store metadata storage.
+        The metadata store only supports str / int / float / bool values — no nested objects.
         """
         return {
             "doc_id":          self.doc_id,
@@ -241,12 +241,12 @@ class ChunkRecord(BaseModel):
     def to_embedding_payload(self) -> dict:
         """
         Returns the dict expected by the Phase 4 embeddings module.
-        Structure: { chunk_id, content, metadata (ChromaDB-compatible flat dict) }
+        Structure: { chunk_id, content, metadata (flat metadata dict) }
         """
         return {
             "chunk_id": self.chunk_id,
             "content":  self.content,
-            "metadata": self.metadata.to_chromadb_dict(),
+            "metadata": self.metadata.to_metadata_dict(),
         }
 
     def to_ledger_dict(self) -> dict:

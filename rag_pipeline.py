@@ -106,7 +106,7 @@ class PipelineConfig(BaseModel):
     # ---- Retrieval ---------------------------------------------------------
     top_k_dense: int = Field(
         default=15, ge=1, le=100,
-        description="Dense candidates fetched from ChromaDB.",
+        description="Dense candidates fetched from the vector store.",
     )
     top_k_bm25: int = Field(
         default=15, ge=1, le=100,

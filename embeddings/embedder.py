@@ -6,7 +6,7 @@ Phase 4: BGE Embedding Model Wrapper
 Model: BAAI/bge-base-en-v1.5
   - Output dimensions: 768
   - Max sequence length: 512 tokens
-  - Normalize embeddings: True (required for cosine similarity in ChromaDB)
+  - Normalize embeddings: True (required for cosine similarity in the vector store)
 
 BGE Asymmetric Retrieval Design:
   - Documents are embedded WITHOUT any instruction prefix.
@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 MODEL_NAME    = "BAAI/bge-base-en-v1.5"
 EMBEDDING_DIM = 768
 BATCH_SIZE    = 100      # Maximized to 100 for cloud API batchEmbedContents limit.
-NORMALIZE     = True     # Mandatory for cosine similarity correctness in ChromaDB.
+NORMALIZE     = True     # Mandatory for cosine similarity correctness in the vector store.
 MAX_SEQ_LEN   = 512      # BGE-base hard token limit.
 
 # BGE instruction prefix — applied to queries ONLY at retrieval time.

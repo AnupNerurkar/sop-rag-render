@@ -3,22 +3,22 @@ embeddings/embed_pipeline.py
 -----------------------------
 Phase 4: Embedding Orchestration Pipeline
 
-Reads chunks from SQLite → embeds with BGEEmbedder → returns ChromaDB-ready
+Reads chunks from SQLite → embeds with BGEEmbedder → returns vector-store-ready
 payloads → stamps embedded_at in SQLite → updates document status to 'embedded'.
 
-ChromaDB Payload Format (output of this module, consumed by Phase 5):
+Embedding Payload Format (output of this module, consumed by Phase 5):
     {
         "chunk_id":  str,           # Deterministic 16-char hex ID
-        "content":   str,           # Raw chunk text (ChromaDB 'document')
+        "content":   str,           # Raw chunk text (the vector store 'document')
         "embedding": list[float],   # 768-dim BGE vector
-        "metadata":  dict,          # Flat ChromaDB-compatible metadata dict
+        "metadata":  dict,          # Flat flat metadata dict
     }
 
 Incremental Design:
     - Only chunks with embedded_at IS NULL are processed.
-    - embedded_at is stamped AFTER successful ChromaDB upsert (Phase 5 calls
+    - embedded_at is stamped AFTER successful vector-store upsert (Phase 5 calls
       ledger.mark_chunks_embedded()). The pipeline itself returns payloads
-      without writing to ChromaDB — that is Phase 5's responsibility.
+      without writing to the vector store — that is Phase 5's responsibility.
     - This keeps Phase 4 and Phase 5 independently testable.
 
 Entry Points:
@@ -48,8 +48,8 @@ logger = logging.getLogger(__name__)
 @dataclass
 class EmbeddingPayload:
     """
-    Single chunk payload ready for ChromaDB upsert.
-    Produced by EmbedPipeline; consumed by Phase 5 (vector_store/chroma_store.py).
+    Single chunk payload ready for vector-store upsert.
+    Produced by EmbedPipeline; consumed by Phase 5 (vector_store/sqlite_store.py).
     """
     chunk_id:  str
     content:   str
@@ -103,7 +103,7 @@ class EmbedPipeline:
     Usage:
         pipeline = EmbedPipeline()
         payloads, summary = pipeline.run()
-        # payloads → pass to Phase 5 (ChromaDB upsert)
+        # payloads → pass to Phase 5 (vector-store upsert)
         # summary  → log / return from API
     """
 
@@ -127,11 +127,11 @@ class EmbedPipeline:
 
         Returns:
             (payloads, summary)
-            payloads: List of EmbeddingPayload objects ready for ChromaDB upsert.
+            payloads: List of EmbeddingPayload objects ready for vector-store upsert.
             summary:  EmbeddingRunSummary with statistics.
 
-        NOTE: This method does NOT write to ChromaDB or stamp embedded_at.
-              Phase 5 (chroma_store.py) calls ledger.mark_chunks_embedded()
+        NOTE: This method does NOT write to the vector store or stamp embedded_at.
+              Phase 5 (sqlite_store.py) calls ledger.mark_chunks_embedded()
               after a successful upsert, keeping the two phases decoupled.
         """
         run_id = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
@@ -228,7 +228,7 @@ class EmbedPipeline:
         return payloads, summary
 
     # ------------------------------------------------------------------
-    # Post-upsert ledger update (called by Phase 5 after ChromaDB upsert)
+    # Post-upsert ledger update (called by Phase 5 after vector-store upsert)
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -237,11 +237,11 @@ class EmbedPipeline:
         Stamps embedded_at on all successfully upserted chunks and updates
         document statuses to 'embedded'.
 
-        Called by Phase 5 (chroma_store.py) AFTER a successful ChromaDB upsert.
+        Called by Phase 5 (sqlite_store.py) AFTER a successful vector-store upsert.
         Returns the number of documents whose status was updated.
 
         This two-phase commit pattern (embed → upsert → stamp) ensures that
-        embedded_at in SQLite is only set when the vector is confirmed in ChromaDB.
+        embedded_at in SQLite is only set when the vector is confirmed in the vector store.
         """
         if not payloads:
             return 0
@@ -274,7 +274,7 @@ def run_embedding(
     """
     Convenience wrapper for running Phase 4 embedding.
 
-    Returns (payloads, summary). Phase 5 receives payloads for ChromaDB upsert.
+    Returns (payloads, summary). Phase 5 receives payloads for vector-store upsert.
 
     Args:
         doc_id:     Optional — restrict to one document (incremental upload path).
@@ -303,6 +303,6 @@ if __name__ == "__main__":
     logger.info("Phase 4: Starting embedding pipeline...")
     payloads, summary = run_embedding()
     print(summary.report())
-    print(f"\nPayloads ready for Phase 5 ChromaDB upsert: {len(payloads)}")
+    print(f"\nPayloads ready for Phase 5 vector-store upsert: {len(payloads)}")
 
     sys.exit(0 if summary.total_failed == 0 else 1)

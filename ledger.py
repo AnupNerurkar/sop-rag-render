@@ -3,109 +3,31 @@ from __future__ import annotations
 import sqlite3
 import os
 from datetime import datetime
-import psycopg2
-import psycopg2.extras
 
 DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "ingestion_ledger.db"))
 
-class PostgreSQLRow(dict):
-    def __init__(self, raw_row, description):
-        self._keys = [col[0] for col in description]
-        super().__init__(zip(self._keys, raw_row))
-        self._values = raw_row
-
-    def __getitem__(self, key):
-        if isinstance(key, int):
-            return self._values[key]
-        return super().__getitem__(key)
-
-class PostgreSQLAdapterCursor:
-    def __init__(self, raw_cursor):
-        self._cursor = raw_cursor
-
-    def execute(self, sql, parameters=None):
-        if "AUTOINCREMENT" in sql:
-            sql = sql.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY")
-            sql = sql.replace("AUTOINCREMENT", "")
-        if parameters:
-            sql = sql.replace("?", "%s")
-        return self._cursor.execute(sql, parameters or ())
-
-    def executemany(self, sql, seq_of_parameters):
-        if "AUTOINCREMENT" in sql:
-            sql = sql.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY")
-            sql = sql.replace("AUTOINCREMENT", "")
-        sql = sql.replace("?", "%s")
-        return self._cursor.executemany(sql, seq_of_parameters)
-
-    def fetchone(self):
-        row = self._cursor.fetchone()
-        if row is None:
-            return None
-        return PostgreSQLRow(row, self._cursor.description)
-
-    def fetchall(self):
-        rows = self._cursor.fetchall()
-        desc = self._cursor.description
-        if not rows:
-            return []
-        return [PostgreSQLRow(r, desc) for r in rows]
-
-    def __getattr__(self, name):
-        return getattr(self._cursor, name)
-
-class PostgreSQLAdapterConnection:
-    def __init__(self, raw_conn):
-        self._conn = raw_conn
-
-    def cursor(self):
-        raw_cursor = self._conn.cursor()
-        return PostgreSQLAdapterCursor(raw_cursor)
-
-    def commit(self):
-        self._conn.commit()
-
-    def rollback(self):
-        self._conn.rollback()
-
-    def close(self):
-        self._conn.close()
 
 def get_connection():
-    """Returns a connection to the database (PostgreSQL or SQLite), creating it if it doesn't exist."""
-    db_url = os.getenv("LEDGER_DATABASE_URL") or os.getenv("DATABASE_URL")
-    if db_url and (db_url.startswith("postgresql://") or db_url.startswith("postgres://")):
-        if db_url.startswith("postgres://"):
-            db_url = db_url.replace("postgres://", "postgresql://", 1)
-        conn = psycopg2.connect(db_url)
-        return PostgreSQLAdapterConnection(conn)
-    else:
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
-        # Every ledger call opens and closes its own connection, and FastAPI
-        # runs `def` endpoints in a threadpool, so concurrent writers are real.
-        # SQLite's default busy timeout is zero — it raises "database is locked"
-        # immediately instead of waiting. WAL additionally keeps readers from
-        # blocking the writer. busy_timeout is per-connection, so it has to be
-        # set here on every connect, not once at setup.
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        return conn
+    """Opens a connection to the local ledger database, creating the file if needed."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    # Every ledger call opens and closes its own connection, and FastAPI
+    # runs `def` endpoints in a threadpool, so concurrent writers are real.
+    # SQLite's default busy timeout is zero — it raises "database is locked"
+    # immediately instead of waiting. WAL additionally keeps readers from
+    # blocking the writer. busy_timeout is per-connection, so it has to be
+    # set here on every connect, not once at setup.
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    return conn
+
 
 def _ensure_column(cursor, table: str, column: str, definition: str) -> None:
     """Adds a column to an existing table if it is not already present."""
-    is_postgres = isinstance(cursor, PostgreSQLAdapterCursor)
-    if is_postgres:
-        cursor._cursor.execute(
-            "SELECT column_name FROM information_schema.columns WHERE table_name = %s",
-            (table.lower(),)
-        )
-        existing = {row["column_name"].lower() for row in cursor.fetchall()}
-    else:
-        cursor.execute(f"PRAGMA table_info({table})")
-        existing = {row[1] for row in cursor.fetchall()}
-        
+    cursor.execute(f"PRAGMA table_info({table})")
+    existing = {row[1] for row in cursor.fetchall()}
+
     if column.lower() not in existing:
         cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
@@ -125,7 +47,7 @@ def _migrate_documents_table(cursor) -> None:
     """Extends the Phase 1 documents table with Phase 2/3 columns."""
     for column, definition in _PHASE2_DOCUMENT_COLUMNS.items():
         if column == "doc_id":
-            # PostgreSQL requires UNIQUE constraint on referenced columns
+            # doc_id is referenced by chunks, so it needs a UNIQUE constraint
             _ensure_column(cursor, "documents", column, "TEXT UNIQUE")
         else:
             _ensure_column(cursor, "documents", column, definition)
@@ -396,7 +318,7 @@ def set_document_uploader(doc_id: str, username: str) -> None:
 
 def delete_document(doc_id: str) -> bool:
     """Removes a document and all its chunks from the ledger. Returns True if a
-    document row was deleted. ChromaDB vectors must be removed separately by the
+    document row was deleted. vectors must be removed separately by the
     caller (vector_store.delete_by_doc_id)."""
     conn = get_connection()
     cursor = conn.cursor()
@@ -617,8 +539,8 @@ def get_chunks_pending_embedding(doc_id: str | None = None) -> list[dict]:
 
 def mark_chunks_embedded(chunk_ids: list[str]) -> None:
     """
-    Stamps embedded_at on a batch of chunks after successful ChromaDB upsert.
-    Uses a single transaction for atomicity — if ChromaDB fails, do not call this.
+    Stamps embedded_at on a batch of chunks after successful vector-store upsert.
+    Uses a single transaction for atomicity — if the vector store fails, do not call this.
     """
     if not chunk_ids:
         return

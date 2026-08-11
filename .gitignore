@@ -13,6 +13,7 @@ __pycache__/
 # Environment
 .env
 .env.*
+.env*
 
 # Logs
 *.log
@@ -39,9 +40,3 @@ data/pending_uploads/
 
 # Databases (Ignore all database files)
 *.db
-
-# Vector Stores
-vector_store/chroma_db/
-
-.vercel
-.env*

@@ -6,7 +6,7 @@ Phase 6: Search Backend Abstraction (BM25-Ready)
 Defines the interface that all search backends implement, plus the
 HybridSearchEngine that combines them.
 
-Current state  : DenseSearchBackend only (ChromaDB + BGE vectors).
+Current state  : DenseSearchBackend only (the vector store + BGE vectors).
 Future state   : BM25SearchBackend (SQLite FTS or rank_bm25) + RRF fusion.
 
 Architecture:
@@ -14,7 +14,7 @@ Architecture:
     HybridSearchEngine
         │
         ├── DenseSearchBackend   ← active now
-        │       └── ChromaStore.query_with_filter()
+        │       └── SQLiteVectorStore.query_with_filter()
         │
         └── BM25SearchBackend    ← STUB (raises NotImplementedError)
                 └── SQLite FTS / rank_bm25  (Phase 6.5 or later)
@@ -74,7 +74,7 @@ class BaseSearchBackend(ABC):
     Abstract base class for all search backends.
 
     Implementors:
-        DenseSearchBackend  — ChromaDB cosine similarity
+        DenseSearchBackend  — cosine similarity
         BM25SearchBackend   — Full-text keyword search (future)
 
     Contract:
@@ -101,15 +101,15 @@ class BaseSearchBackend(ABC):
 
 
 # ---------------------------------------------------------------------------
-# Dense backend (ChromaDB + BGE)
+# Dense backend (the vector store + BGE)
 # ---------------------------------------------------------------------------
 
 class DenseSearchBackend(BaseSearchBackend):
     """
-    Semantic similarity search using ChromaDB and BAAI/bge-base-en-v1.5.
+    Semantic similarity search using the vector store and BAAI/bge-base-en-v1.5.
 
     Uses query_vector; query_text is ignored (the vector already encodes it).
-    where_clause is passed directly to ChromaDB.query_with_filter().
+    where_clause is passed directly to the vector store.query_with_filter().
     """
 
     @property
@@ -124,20 +124,20 @@ class DenseSearchBackend(BaseSearchBackend):
         n_results:    int,
     ) -> list[RawSearchResult]:
         """
-        Runs a ChromaDB nearest-neighbour query.
+        Runs a nearest-neighbour query.
 
         Args:
             query_text:   Ignored by this backend (vector already encodes it).
             query_vector: 768-dim BGE embedding of the (preprocessed) query.
-            where_clause: Optional ChromaDB metadata where-clause from filters.py.
+            where_clause: Optional the vector store metadata where-clause from filters.py.
             n_results:    Number of results to return.
 
         Returns:
             List of RawSearchResult sorted by score descending.
         """
-        from vector_store.chroma_store import get_chroma_store
+        from vector_store.sqlite_store import get_vector_store
 
-        store = get_chroma_store()
+        store = get_vector_store()
         raw = store.query_with_filter(
             query_embedding = query_vector,
             where_clause    = where_clause,
@@ -278,7 +278,7 @@ class HybridSearchEngine:
 
         For each unique chunk, sums   1/(RRF_K + rank)   across backends.
         Re-ranks by fused score. Preserves metadata from dense results
-        (they carry full ChromaDB metadata).
+        (they carry full the vector store metadata).
         """
         scores: dict[str, float] = {}
         meta:   dict[str, RawSearchResult] = {}

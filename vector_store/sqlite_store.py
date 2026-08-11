@@ -1,19 +1,20 @@
 """
 vector_store/sqlite_store.py
 -----------------------------
-Local SQLite vector store — the on-Pi replacement for PGVectorStore.
-
-Vectors live in the same database file as the ledger's `chunks` table
-(ingestion_ledger.db, via ledger.get_connection()), exactly as PGVectorStore
-does under Postgres. That colocation is what makes the citation JOIN possible.
+The vector store. Everything is local: vectors live in the same database file
+as the ledger's `chunks` table (ingestion_ledger.db, via
+ledger.get_connection()), and that colocation is what makes the citation JOIN
+possible. Nothing here talks to the network.
 
 Similarity search is a brute-force numpy dot product. Vectors are L2-normalized
 at write time, so the dot product IS cosine similarity, and:
 
-    distance = 1.0 - dot      (matches pgvector's <=> cosine distance)
-    score    = dot            (matches PGVectorStore's 1.0 - distance)
+    distance = 1.0 - dot      (the cosine distance pgvector used to return)
+    score    = dot
 
-Score parity with pgvector is load-bearing: response_schema.compute_confidence
+Score parity with the old pgvector backend is load-bearing even now that it is
+gone, because the thresholds calibrated against it remain:
+response_schema.compute_confidence
 hard-thresholds at similarity < 0.70, so a scale mismatch would silently turn
 every answer into the insufficient-evidence fallback without raising anything.
 
@@ -31,11 +32,73 @@ from typing import Optional
 import numpy as np
 
 from ledger import get_connection
-from vector_store.pgvector_store import _where_clause_to_sql
 
 logger = logging.getLogger(__name__)
 
 EMBEDDING_DIM = 768
+
+# Logical name of the vector collection. Retained because the ledger rows and
+# the operational scripts refer to it; it is not a vector collection.
+COLLECTION_NAME = "vit_institutional_kb"
+
+# Which access levels each role may read. A role always sees its own level and
+# everything below it.
+ACCESS_HIERARCHY: dict[str, list[str]] = {
+    "Admin":   ["Public", "Student", "Faculty", "Admin"],
+    "Faculty": ["Public", "Student", "Faculty"],
+    "Student": ["Public", "Student"],
+    "Public":  ["Public"],
+}
+
+
+def _condition_to_sql(field: str, op_dict: dict) -> tuple[str, list]:
+    """Converts a single {field: {"$eq"|"$in": value}} condition to SQL."""
+    if "$eq" in op_dict:
+        return f"{field} = ?", [op_dict["$eq"]]
+    if "$in" in op_dict:
+        values = list(op_dict["$in"])
+        placeholders = ",".join(["?"] * len(values))
+        return f"{field} IN ({placeholders})", values
+    raise ValueError(f"Unsupported where-clause operator for field '{field}': {op_dict}")
+
+
+def _where_clause_to_sql(where_clause: Optional[dict]) -> tuple[str, list]:
+    """
+    Converts a nested metadata where-clause (see retrieval/filters.py) into a
+    SQL WHERE fragment (without the "WHERE" keyword) and its params.
+    Supports $and, $or, $eq, $in — the operators filters.py actually emits.
+    """
+    if not where_clause:
+        return "", []
+    if "$and" in where_clause:
+        parts, params = [], []
+        for cond in where_clause["$and"]:
+            sql, p = _where_clause_to_sql(cond)
+            parts.append(f"({sql})")
+            params.extend(p)
+        return " AND ".join(parts), params
+    if "$or" in where_clause:
+        parts, params = [], []
+        for cond in where_clause["$or"]:
+            sql, p = _where_clause_to_sql(cond)
+            parts.append(f"({sql})")
+            params.extend(p)
+        return " OR ".join(parts), params
+    field, op_dict = next(iter(where_clause.items()))
+    return _condition_to_sql(field, op_dict)
+
+
+_vector_store_instance = None
+
+
+def get_vector_store() -> "SQLiteVectorStore":
+    """Process-level vector store singleton. There is one backend: local SQLite."""
+    global _vector_store_instance
+    if _vector_store_instance is None:
+        logger.info("[VECTOR_STORE] Instantiating SQLiteVectorStore (local)")
+        _vector_store_instance = SQLiteVectorStore()
+        _vector_store_instance.initialize()
+    return _vector_store_instance
 
 
 def _pack(vector) -> bytes:
@@ -60,14 +123,12 @@ class SQLiteVectorStore:
     """
     Local SQLite + numpy vector store.
 
-    Implements the same public API as PGVectorStore and ChromaStore so that
-    retrieval/hybrid_search.py works against any of the three unchanged.
+    Implements the vector-store API so that
+    retrieval/hybrid_search.py depends only on this surface.
     """
 
     def __init__(self) -> None:
         self._initialized = False
-        # backend/app.py's startup validation reads this private attr directly.
-        self._collection = None
 
     def initialize(self) -> None:
         if self._initialized:
@@ -202,8 +263,8 @@ class SQLiteVectorStore:
         n_results: int = 10,
     ) -> list:
         """
-        Nearest-neighbour search with a pre-built ChromaDB-style metadata filter
-        (see retrieval/filters.py). Mirrors PGVectorStore.query_with_filter's
+        Nearest-neighbour search with a pre-built metadata filter
+        (see retrieval/filters.py). Mirrors the query_with_filter
         contract so retrieval/hybrid_search.py works against either backend.
         """
         self.initialize()
@@ -280,12 +341,11 @@ class SQLiteVectorStore:
         """
         RBAC-filtered nearest-neighbour search.
 
-        Return shape matches PGVectorStore.query exactly — note the key is "id"
+        Return shape uses "id" as the key
         (not "chunk_id") and there is deliberately no "distance" key.
         """
         self.initialize()
 
-        from vector_store.chroma_store import ACCESS_HIERARCHY
         allowed_levels = ACCESS_HIERARCHY.get(role, ["Public"])
 
         conn = get_connection()

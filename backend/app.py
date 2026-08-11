@@ -26,7 +26,7 @@ Endpoints:
   GET  /api/admin/stats           — doc + vector stats (Admin)
   GET  /api/admin/documents       — full document list (Admin)
   GET  /api/admin/logs            — ingestion audit log (Admin)
-  GET  /api/admin/chroma          — ChromaDB vector count (Admin)
+  GET  /api/admin/vectors         — vector count (Admin)
 
   POST /api/agent/chat            — LangGraph agentic chat with memory (auth)
 """
@@ -99,7 +99,7 @@ def on_startup():
     # Phase 3: Startup Validation Report
     try:
         import ledger
-        from vector_store.chroma_store import get_chroma_store
+        from vector_store.sqlite_store import get_vector_store
         
         ledger.initialize_db()
         docs = ledger.get_all_documents()
@@ -118,35 +118,35 @@ def on_startup():
             else:
                 missing_files += 1
                 
-        store = get_chroma_store()
-        chroma_count = store._collection.count() if store._collection else 0
+        store = get_vector_store()
+        vector_count = store.get_collection_stats().get("vector_count", 0)
         ledger_chunk_count = ledger.get_chunk_count()
-        
+
+        # Orphans are vectors whose chunk row is gone from the ledger. Both
+        # tables live in the same SQLite file, so this is one anti-join rather
+        # than pulling every id into Python as the old backend did.
         orphaned_count = 0
-        if store._collection and chroma_count > 0:
-            chroma_data = store._collection.get(include=[])
-            chroma_ids = set(chroma_data.get("ids") or [])
-            
+        if vector_count > 0:
             conn = ledger.get_connection()
             try:
                 cur = conn.cursor()
-                cur.execute("SELECT chunk_id FROM chunks")
-                rows = cur.fetchall()
-                ledger_ids = {row["chunk_id"] if (isinstance(row, dict) or not isinstance(row, tuple)) else row[0] for row in rows}
+                cur.execute(
+                    "SELECT COUNT(*) AS cnt FROM embeddings "
+                    "WHERE id NOT IN (SELECT chunk_id FROM chunks)"
+                )
+                row = cur.fetchone()
+                orphaned_count = row["cnt"] if not isinstance(row, tuple) else row[0]
             finally:
                 conn.close()
-            
-            orphaned_ids = chroma_ids - ledger_ids
-            orphaned_count = len(orphaned_ids)
-            
+
         logging.info(
             f"[STARTUP] [VALIDATION] Ingestion Integrity Report:\n"
             f"  - Total Documents in Ledger: {total_docs}\n"
             f"  - Existing Physical Files:   {existing_files}\n"
             f"  - Missing Physical Files:    {missing_files}\n"
             f"  - Chunks in SQLite Ledger:   {ledger_chunk_count}\n"
-            f"  - Vectors in ChromaDB:       {chroma_count}\n"
-            f"  - Orphaned Chroma Vectors:   {orphaned_count}"
+            f"  - Vectors in store:          {vector_count}\n"
+            f"  - Orphaned vectors:          {orphaned_count}"
         )
     except Exception as exc:
         logging.error(f"[STARTUP] Ingestion validation failed: {exc}")
@@ -898,10 +898,10 @@ def _require_admin(current_user: User = Depends(get_current_user)) -> User:
 
 @app.get("/api/admin/stats")
 def admin_stats(_: User = Depends(_require_admin)):
-    """Document counts, chunk counts, vector counts from ledger + ChromaDB."""
-    from backend.document_manager import get_document_stats, get_chroma_vector_count
+    """Document counts, chunk counts, vector counts from ledger + vector store."""
+    from backend.document_manager import get_document_stats, get_vector_count
     stats = get_document_stats()
-    stats["chroma_vector_count"] = get_chroma_vector_count()
+    stats["vector_count"] = get_vector_count()
     return stats
 
 
@@ -932,7 +932,7 @@ def admin_documents(_: User = Depends(_require_admin)):
 
 @app.delete("/api/admin/documents/{doc_id}")
 def admin_delete_document(doc_id: str, current_user: User = Depends(_require_admin)):
-    """Removes a document from the knowledge base (ledger + ChromaDB vectors)."""
+    """Removes a document from the knowledge base (ledger + vectors)."""
     from backend.document_manager import delete_document
     from backend.committee_manager import mark_removed_by_doc_id
     result = delete_document(doc_id)
@@ -952,15 +952,15 @@ def admin_logs(
     return get_ingestion_logs(limit=limit)
 
 
-@app.get("/api/admin/chroma")
-def admin_chroma(_: User = Depends(_require_admin)):
-    """ChromaDB collection info."""
-    from backend.document_manager import get_chroma_vector_count
+@app.get("/api/admin/vectors")
+def admin_vectors(_: User = Depends(_require_admin)):
+    """Local vector store info."""
+    from backend.document_manager import get_vector_count
     from backend.document_manager import get_document_stats
     stats = get_document_stats()
     return {
         "collection":    "vit_institutional_kb",
-        "vector_count":  get_chroma_vector_count(),
+        "vector_count":  get_vector_count(),
         "total_chunks":  stats["total_chunks"],
         "embedded":      stats["embedded_vectors"],
         "coverage_pct":  round(

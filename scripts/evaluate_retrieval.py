@@ -4,7 +4,7 @@ scripts/evaluate_retrieval.py
 Comparative retrieval quality evaluation.
 
 Compares three retrieval modes on a 20-query test set:
-    Mode A: Dense Only         (BGE embedding + ChromaDB)
+    Mode A: Dense Only         (BGE embedding + the vector store)
     Mode B: Hybrid             (Dense + BM25 + RRF, no reranker)
     Mode C: Hybrid + Reranker  (Dense + BM25 + RRF + bge-reranker-base)
 

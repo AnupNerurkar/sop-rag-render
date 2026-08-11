@@ -3,7 +3,7 @@ tests/test_citation_engine.py
 -------------------------------
 Unit tests for rag/citation_engine.py and rag/citation_schema.py.
 
-All tests are offline — no Ollama, ChromaDB, or model load.
+All tests are offline — no Ollama, the vector store, or model load.
 Run: pytest tests/test_citation_engine.py -v
 """
 

@@ -6,7 +6,7 @@ Admin Document Management: upload → ingest → embed → index.
 Handles:
   - SHA-256 deduplication (reject exact duplicate content)
   - Version supersession detection (same department, new version)
-  - Auto-trigger ingestion → chunking → embedding → ChromaDB indexing
+  - Auto-trigger ingestion → chunking → embedding → vector indexing
   - Support for .docx files (the VIT SOP corpus format)
   - File staging to data/staging/ before ingestion
 
@@ -117,7 +117,7 @@ def run_ingestion_background(
 STAGING_DIR = Path(_PROJECT_ROOT) / "data" / "staging"
 # Admin-uploadable formats. Text extraction for each is handled by the shared
 # ingestion pipeline (ingestion_pipeline.ingest_document); chunking, embedding,
-# ChromaDB indexing and BM25 indexing are identical regardless of format.
+# vector indexing and BM25 indexing are identical regardless of format.
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".doc"}
 
 
@@ -160,7 +160,7 @@ def ingest_uploaded_file(
       3. Save to staging directory
       4. Phase 2: ingest (text extraction + metadata + ledger)
       5. Phase 3: chunk (already called by ingestion_pipeline.ingest_document)
-      6. Phase 4+5: embed + index to ChromaDB
+      6. Phase 4+5: embed + index to the vector store
 
     Args:
         forced_access_level: if provided, overrides the content-heuristic
@@ -392,15 +392,15 @@ def get_ingestion_logs(limit: int = 50) -> list[dict]:
 
 
 def delete_document(doc_id: str) -> dict:
-    """Removes a document from ChromaDB and the ledger (document + chunks).
+    """Removes a document from the vector store and the ledger (document + chunks).
     Returns {removed: bool, vectors_removed: int}."""
     vectors_removed = 0
     try:
-        from vector_store.chroma_store import get_chroma_store
-        store = get_chroma_store()
+        from vector_store.sqlite_store import get_vector_store
+        store = get_vector_store()
         vectors_removed = store.delete_by_doc_id(doc_id) or 0
     except Exception as exc:
-        logger.warning("[DOC_MANAGER] Chroma delete failed for %s: %s", doc_id, exc)
+        logger.warning("[DOC_MANAGER] Vector delete failed for %s: %s", doc_id, exc)
 
     import ledger
     removed = ledger.delete_document(doc_id)
@@ -408,11 +408,11 @@ def delete_document(doc_id: str) -> dict:
     return {"removed": removed, "vectors_removed": vectors_removed}
 
 
-def get_chroma_vector_count() -> int:
-    """Returns the current vector count in ChromaDB."""
+def get_vector_count() -> int:
+    """Returns the current vector count in the local store."""
     try:
-        from vector_store.chroma_store import get_chroma_store
-        store = get_chroma_store()
+        from vector_store.sqlite_store import get_vector_store
+        store = get_vector_store()
         stats = store.get_collection_stats()
         return stats.get("vector_count", stats.get("total_vectors", 0))
     except Exception:

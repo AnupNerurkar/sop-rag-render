@@ -44,7 +44,7 @@ def _discard_pending_file(stored_path: str) -> None:
     """Removes a reviewed submission's staged copy from data/pending_uploads/.
 
     Once a submission is reviewed the raw bytes are no longer needed: approved
-    files live in data/staging/ + ChromaDB, and the CommitteeUpload row retains
+    files live in data/staging/ + the vector store, and the CommitteeUpload row retains
     all submission metadata. This keeps data/pending_uploads/ holding only files
     still awaiting review.
     """

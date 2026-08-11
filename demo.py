@@ -4,7 +4,7 @@ demo.py
 --------
 VIT Agentic AI Assistant -- Project Status Demonstration
 
-READ-ONLY: Never writes to SQLite, ChromaDB, or any document.
+READ-ONLY: Never writes to SQLite, the vector store, or any document.
 Every value is read from existing modules; no logic is duplicated.
 
 Run: .venv/Scripts/python.exe demo.py
@@ -253,50 +253,35 @@ def section_3() -> dict:
 
 
 # -----------------------------------------------------------------------------
-# Section 4 -- ChromaDB Status
+# Section 4 -- Vector Store Status
 # -----------------------------------------------------------------------------
 
 def section_4() -> dict:
-    _section(4, "ChromaDB Status")
+    _section(4, "Vector Store Status")
 
     try:
-        from vector_store.chroma_store import (
-            get_chroma_store, COLLECTION_NAME, CHROMA_DB_PATH,
-        )
+        from vector_store.sqlite_store import get_vector_store, COLLECTION_NAME
 
-        store = get_chroma_store()
+        store = get_vector_store()
         stats = store.get_collection_stats()
         count = stats["vector_count"]
 
-        meta_keys: list = []
-        try:
-            peek = store._collection.peek(limit=1)
-            if peek.get("metadatas") and peek["metadatas"][0]:
-                meta_keys = sorted(peek["metadatas"][0].keys())
-        except Exception:
-            pass
-
-        coll_meta = {}
-        try:
-            coll_meta = store._collection.metadata or {}
-        except Exception:
-            pass
-        distance = coll_meta.get("hnsw:space", "cosine")
-
-        db_size = _dir_size(CHROMA_DB_PATH) if os.path.isdir(CHROMA_DB_PATH) else 0
+        # Vectors live in the ledger database, so the "store size" is that file.
+        db_path = stats.get("db_path", "")
+        db_size = os.path.getsize(db_path) if db_path and os.path.isfile(db_path) else 0
 
         _row("Collection name",  COLLECTION_NAME)
         _row("Vectors stored",   count, color=Fore.GREEN if count > 0 else Fore.RED)
-        _row("Distance metric",  distance)
-        _row("Persistence path", os.path.relpath(CHROMA_DB_PATH, _ROOT))
-        _row("ChromaDB size",    _fmt_bytes(db_size))
-        if meta_keys:
-            _row("Metadata fields", ", ".join(meta_keys))
+        _row("Documents covered", stats.get("document_count", 0))
+        _row("Distance metric",  "cosine (normalized dot product)")
+        _row("Backend",          stats.get("backend", "sqlite"))
+        _row("Persistence path", db_path)
+        _row("Store size",       _fmt_bytes(db_size))
 
-        return {"vectors": count, "db_path": CHROMA_DB_PATH, "db_size": db_size}
+        return {"vectors": count, "db_path": db_path, "db_size": db_size}
 
     except Exception as exc:
-        print(f"  {Fore.RED}ERROR accessing ChromaDB: {exc}{Style.RESET_ALL}")
+        print(f"  {Fore.RED}ERROR accessing vector store: {exc}{Style.RESET_ALL}")
         return {}
 
 
@@ -473,7 +458,7 @@ def section_8() -> None:
     _phase("Phase 2  Document Ingestion",         True)
     _phase("Phase 3  SOP-Aware Chunking",         True)
     _phase("Phase 4  BGE Embeddings",             True)
-    _phase("Phase 5  ChromaDB Vector Store",      True)
+    _phase("Phase 5  Vector Store",      True)
     _phase("Phase 6  Hybrid Retrieval",           True)
     _phase("Phase 6.5 Cross-Encoder Reranker",    True)
     _phase("Phase 7  Prompt Builder",             True)
@@ -496,7 +481,7 @@ def section_9() -> None:
         ("Metadata Extraction",         "title, dept, category, version"),
         ("Chunking",                    "SOP-aware recursive splitter"),
         ("BGE Embeddings",              "BAAI/bge-base-en-v1.5  (768-dim)"),
-        ("ChromaDB",                    "persistent cosine-distance store"),
+        ("the vector store",                    "persistent cosine-distance store"),
         ("Hybrid Retrieval",            "dense + BM25 + RRF"),
         ("Cross-Encoder Reranker",      "BAAI/bge-reranker-base"),
         ("Prompt Builder",              "system + context + question"),
@@ -537,7 +522,7 @@ def section_10(s1: dict, s3: dict, s4: dict) -> None:
     embedded     = s3.get("embedded",     "N/A")
     model        = s3.get("model",        "BAAI/bge-base-en-v1.5")
     vectors      = s4.get("vectors",      "N/A")
-    chroma_size  = s4.get("db_size",      0)
+    store_size   = s4.get("db_size",      0)
 
     avg_per_doc = (
         f"{total_chunks / total_docs:.1f}"
@@ -549,16 +534,16 @@ def section_10(s1: dict, s3: dict, s4: dict) -> None:
     _row("Documents",               total_docs)
     _row("Chunks",                  total_chunks)
     _row("Embedded vectors",        embedded,     color=Fore.GREEN)
-    _row("ChromaDB vectors",        vectors,      color=Fore.GREEN)
+    _row("vectors",        vectors,      color=Fore.GREEN)
     _row("Departments",             depts)
     _row("Categories",              cats)
     _row("Average chunks/document", avg_per_doc)
     _row("Average chunk size",      f"{avg_size:.0f} chars" if avg_size else "N/A")
     _row("Embedding model",         model)
     _row("LLM model",               "Qwen2.5:7B  (via Ollama)")
-    _row("Vector database",         "ChromaDB  (PersistentClient)")
+    _row("Vector database",         "the vector store  (PersistentClient)")
     _row("SQLite ledger size",      _fmt_bytes(db_size))
-    _row("ChromaDB storage size",   _fmt_bytes(chroma_size))
+    _row("Vector store size",         _fmt_bytes(store_size))
 
 
 # -----------------------------------------------------------------------------

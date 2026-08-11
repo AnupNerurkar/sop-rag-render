@@ -4,35 +4,30 @@ from datetime import datetime
 from sqlalchemy import Boolean, Column, DateTime, Integer, String, Text, create_engine, event
 from sqlalchemy.orm import declarative_base, sessionmaker
 
+# Local SQLite only. DATABASE_URL stays configurable so the file can be moved,
+# but there is no remote-database path any more.
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./institutional.db")
-if DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
-IS_SQLITE = DATABASE_URL.startswith("sqlite")
+engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 
-if IS_SQLITE:
-    engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
-else:
-    engine = create_engine(DATABASE_URL)
 
-if IS_SQLITE:
-    @event.listens_for(engine, "connect")
-    def _sqlite_pragmas(dbapi_conn, _connection_record):
-        """
-        FastAPI serves `def` endpoints from a threadpool, so this engine has
-        concurrent writers. SQLite's default busy timeout is zero, which turns
-        ordinary contention into "database is locked" 500s. WAL also lets
-        readers proceed while a write is in flight. journal_mode persists with
-        the file, but busy_timeout is per-connection and must be set on each.
-        Mirrors the PRAGMAs in ledger.get_connection().
-        """
-        cursor = dbapi_conn.cursor()
-        try:
-            cursor.execute("PRAGMA journal_mode=WAL")
-            cursor.execute("PRAGMA busy_timeout=5000")
-            cursor.execute("PRAGMA synchronous=NORMAL")
-        finally:
-            cursor.close()
+@event.listens_for(engine, "connect")
+def _sqlite_pragmas(dbapi_conn, _connection_record):
+    """
+    FastAPI serves `def` endpoints from a threadpool, so this engine has
+    concurrent writers. SQLite's default busy timeout is zero, which turns
+    ordinary contention into "database is locked" 500s. WAL also lets
+    readers proceed while a write is in flight. journal_mode persists with
+    the file, but busy_timeout is per-connection and must be set on each.
+    Mirrors the PRAGMAs in ledger.get_connection().
+    """
+    cursor = dbapi_conn.cursor()
+    try:
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA busy_timeout=5000")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+    finally:
+        cursor.close()
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
@@ -110,20 +105,10 @@ def get_db():
 
 def _ensure_column(cursor, table: str, column: str, definition: str) -> None:
     """Adds a column to an existing table if it is not already present."""
-    if engine.dialect.name == "postgresql":
-        cursor.execute(
-            "SELECT column_name FROM information_schema.columns WHERE table_name = %s",
-            (table.lower(),)
-        )
-        existing = {row[0].lower() for row in cursor.fetchall()}
-    else:
-        cursor.execute(f"PRAGMA table_info({table})")
-        existing = {row[1] for row in cursor.fetchall()}
-        
+    cursor.execute(f"PRAGMA table_info({table})")
+    existing = {row[1] for row in cursor.fetchall()}
+
     if column.lower() not in existing:
-        if engine.dialect.name == "postgresql":
-            if "DEFAULT 0" in definition.upper() and "BOOLEAN" in definition.upper():
-                definition = definition.replace("DEFAULT 0", "DEFAULT FALSE")
         cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 

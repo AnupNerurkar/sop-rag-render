@@ -3,8 +3,8 @@ tests/test_retrieval.py
 ------------------------
 Phase 6: Unit and integration tests for the retrieval layer.
 
-Fast unit tests (no model, no ChromaDB) are unmarked — they run in < 1 second.
-Integration tests that hit the live ChromaDB are marked @pytest.mark.slow.
+Fast unit tests (no model, no the vector store) are unmarked — they run in < 1 second.
+Integration tests that hit the live the vector store are marked @pytest.mark.slow.
 """
 
 from __future__ import annotations
@@ -411,12 +411,12 @@ class TestBuildCitation:
 
 
 # ===========================================================================
-# Integration tests — require live ChromaDB and BGE model
+# Integration tests — require live the vector store and BGE model
 # ===========================================================================
 
 @pytest.mark.slow
 class TestRetrieverIntegration:
-    """End-to-end retrieval tests against the live production ChromaDB index."""
+    """End-to-end retrieval tests against the live production the vector store index."""
 
     @pytest.fixture(scope="class")
     def retriever(self):

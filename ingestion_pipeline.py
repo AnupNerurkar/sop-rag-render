@@ -14,7 +14,7 @@ Key Features:
   - Version supersession: marks old document as 'superseded' when a newer version
     of the same module is detected.
   - SQLite auditing: all actions are logged to ingestion_ledger.db.
-  - ChromaDB-ready output: produces ChunkRecord.to_embedding_payload() dicts.
+  - vector-store-ready output: produces ChunkRecord.to_embedding_payload() dicts.
 """
 
 from __future__ import annotations

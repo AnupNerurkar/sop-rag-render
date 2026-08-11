@@ -7,8 +7,8 @@ version: "3.9"
 #   ollama      — Ollama LLM server (port 11434); GPU-accelerated if available
 #
 # Persistent volumes:
-#   chroma_data — ChromaDB vector store
-#   sqlite_data — SQLite ledger (ingestion_ledger.db) + institutional.db
+#   sqlite_data — SQLite ledger (ingestion_ledger.db, also holds the vectors)
+#                 + institutional.db
 #   ollama_data — Ollama model cache (avoids re-downloading qwen2.5:7b on restart)
 #   staging_vol — uploaded document staging area
 #
@@ -64,7 +64,7 @@ services:
   edumind:
     build:
       context: ..
-      dockerfile: docker/Dockerfile
+      dockerfile: Dockerfile
     container_name: edumind_app
     restart: unless-stopped
     ports:
@@ -83,7 +83,6 @@ services:
       # Python path includes project root
       PYTHONPATH: "/app"
     volumes:
-      - chroma_data:/app/vector_store/chroma_db
       - sqlite_data:/app
       - staging_vol:/app/data/staging
       # Mount HuggingFace model cache so models survive container rebuilds
@@ -98,8 +97,6 @@ services:
 volumes:
   ollama_data:
     name: edumind_ollama_data
-  chroma_data:
-    name: edumind_chroma_data
   sqlite_data:
     name: edumind_sqlite_data
   staging_vol:

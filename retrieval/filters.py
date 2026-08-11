@@ -4,8 +4,8 @@ retrieval/filters.py
 Phase 6: Filter Construction and RBAC Enforcement
 
 Single responsibility: convert a (role, RetrievalFilter) pair into a
-ChromaDB-compatible `where` dict that can be passed directly to
-ChromaStore.query_with_filter().
+metadata `where` dict that can be passed directly to
+SQLiteVectorStore.query_with_filter().
 
 RBAC hierarchy:
     Admin   → ["Public", "Student", "Faculty", "Admin"]
@@ -13,7 +13,7 @@ RBAC hierarchy:
     Student → ["Public", "Student"]
     Public  → ["Public"]
 
-ChromaDB where-clause operators used:
+metadata where-clause operators used:
     $eq   — exact match for a single value
     $in   — match any value in a list (used for multi-level RBAC)
     $and  — all conditions must match (list of condition dicts)
@@ -21,7 +21,7 @@ ChromaDB where-clause operators used:
 Design:
     FilterBuilder is the public API.
     build() returns the where dict or None (no filter = Admin on empty RetrievalFilter).
-    Downstream code (DenseSearchBackend) passes this directly to ChromaDB.
+    Downstream code (DenseSearchBackend) passes this directly to the store.
 """
 
 from __future__ import annotations
@@ -57,14 +57,14 @@ def get_allowed_levels(role: str) -> list[str]:
 
 class FilterBuilder:
     """
-    Builds a ChromaDB-compatible `where` dict from an (role, RetrievalFilter).
+    Builds a metadata `where` dict from an (role, RetrievalFilter).
 
     Usage:
         where = FilterBuilder(role="Student", filters=query.filters).build()
         results = store.query_with_filter(embedding, where, n_results=10)
 
     The build() method returns None only when Admin queries with no metadata
-    filters — in that case ChromaDB can skip the where evaluation entirely,
+    filters — in that case the store can skip the where evaluation entirely,
     which is a meaningful performance hint.
     """
 
@@ -74,7 +74,7 @@ class FilterBuilder:
 
     def build(self) -> Optional[dict]:
         """
-        Returns a ChromaDB where dict, or None if no filtering is needed.
+        Returns a metadata where dict, or None if no filtering is needed.
 
         None is only returned for Admin role with no metadata filters — every
         other case produces at least the RBAC access_level constraint.

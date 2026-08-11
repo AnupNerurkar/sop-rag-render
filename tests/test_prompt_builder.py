@@ -3,7 +3,7 @@ tests/test_prompt_builder.py
 -----------------------------
 Unit tests for the Prompt Builder layer (rag/prompt_builder.py, rag/prompt_schema.py).
 
-All tests are pure-Python — no ChromaDB, no models, no SQLite.
+All tests are pure-Python — no the vector store, no models, no SQLite.
 Run: pytest tests/test_prompt_builder.py -v
 """
 

@@ -54,7 +54,7 @@ class RetrievalFilter(BaseModel):
     Optional metadata pre-filters applied before vector similarity search.
     All fields are optional — omitting a field means no filter on that dimension.
 
-    Multiple fields are combined with AND logic inside ChromaDB.
+    Multiple fields are combined with AND logic inside the store.
 
     Note on doc_id: pass the full 64-character SHA-256 hex string to retrieve
     chunks from one specific document version only.
@@ -100,7 +100,7 @@ class RetrievalQuery(BaseModel):
     The complete specification for a single retrieval request.
 
     Validated at construction — if `top_k` is out of range or the query text
-    is empty, Pydantic raises before any embedding or ChromaDB work happens.
+    is empty, Pydantic raises before any embedding or the vector store work happens.
     """
 
     text: str = Field(
@@ -146,7 +146,7 @@ class RetrievalQuery(BaseModel):
     top_k_dense: int = Field(
         default=DEFAULT_TOP_K_DENSE,
         ge=1, le=100,
-        description="Number of candidates fetched from ChromaDB dense retrieval.",
+        description="Number of candidates fetched from dense retrieval.",
     )
     top_k_bm25: int = Field(
         default=DEFAULT_TOP_K_BM25,

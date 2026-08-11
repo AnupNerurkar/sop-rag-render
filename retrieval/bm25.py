@@ -5,7 +5,7 @@ BM25 keyword retrieval backend.
 
 Corpus: all 627 chunks loaded from SQLite on first search (lazy, ~0.3s).
 Index:  BM25Okapi from rank_bm25, rebuilt whenever new chunks are ingested.
-Filter: post-filters BM25 results using a small ChromaDB where-clause
+Filter: post-filters BM25 results using a small metadata where-clause
         interpreter supporting $eq, $in, $and.
 
 Why BM25 alongside dense vectors?
@@ -49,12 +49,12 @@ def _tokenize(text: str) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Where-clause interpreter (ChromaDB → Python predicate)
+# Where-clause interpreter (the vector store → Python predicate)
 # ---------------------------------------------------------------------------
 
 def _matches_where(metadata: dict, where: Optional[dict]) -> bool:
     """
-    Evaluates a ChromaDB-format where-clause against a metadata dict.
+    Evaluates a metadata where-clause against a metadata dict.
 
     Supports the operators produced by filters.FilterBuilder:
         {"field": {"$eq": value}}

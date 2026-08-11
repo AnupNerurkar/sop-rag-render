@@ -3,18 +3,18 @@ vector_store/index_pipeline.py
 -------------------------------
 Phase 5: End-to-End Indexing Orchestrator
 
-Connects Phase 4 (Embeddings) and Phase 5 (ChromaDB) into one run:
+Connects Phase 4 (Embeddings) and Phase 5 (the vector store) into one run:
 
     SQLite chunks (pending)
          ↓  embed_pipeline.run()
     EmbeddingPayload list (768-dim vectors)
-         ↓  chroma_store.upsert()
-    ChromaDB collection
+         ↓  sqlite_store.upsert()
+    vector collection
          ↓  EmbedPipeline.mark_embedded()
     SQLite (embedded_at stamped, document status → 'embedded')
 
 Two-phase commit guarantee:
-    embedded_at is ONLY stamped in SQLite AFTER ChromaDB confirms the upsert.
+    embedded_at is ONLY stamped in SQLite AFTER the vector store confirms the upsert.
     If the upsert fails, chunks remain pending and will be retried on the next run.
 
 Incremental design:
@@ -98,7 +98,7 @@ def run_indexing(
         IndexingRunSummary with full statistics.
     """
     from embeddings.embed_pipeline import EmbedPipeline, run_embedding
-    from vector_store.chroma_store import get_chroma_store
+    from vector_store.sqlite_store import get_vector_store
 
     run_id = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     summary = IndexingRunSummary(
@@ -135,15 +135,15 @@ def run_indexing(
         return summary
 
     # ----------------------------------------------------------------
-    # Phase 5: Upsert into ChromaDB
+    # Phase 5: Upsert into the vector store
     # ----------------------------------------------------------------
-    logger.info(f"[INDEX PIPELINE] Phase 5: Upserting {len(payloads)} vectors into ChromaDB...")
+    logger.info(f"[INDEX PIPELINE] Phase 5: Upserting {len(payloads)} vectors into the vector store...")
     try:
-        store = get_chroma_store()
+        store = get_vector_store()
         upserted = store.upsert(payloads)
         summary.chunks_upserted = upserted
     except Exception as e:
-        msg = f"ChromaDB upsert failed: {e}"
+        msg = f"vector-store upsert failed: {e}"
         logger.error(f"[INDEX PIPELINE] {msg}", exc_info=True)
         summary.errors.append(msg)
         summary.completed_at = datetime.utcnow().isoformat()
@@ -161,7 +161,7 @@ def run_indexing(
             f"{len(payloads)} chunks stamped, {docs_updated} docs → 'embedded'."
         )
     except Exception as e:
-        msg = f"Ledger stamp failed (ChromaDB upsert succeeded): {e}"
+        msg = f"Ledger stamp failed (vector-store upsert succeeded): {e}"
         logger.error(f"[INDEX PIPELINE] {msg}", exc_info=True)
         summary.errors.append(msg)
 
