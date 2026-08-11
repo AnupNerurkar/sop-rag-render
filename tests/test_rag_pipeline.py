@@ -9,7 +9,7 @@ Unit tests (no network, no model load)
     replaced with lightweight fakes built from real Pydantic models.
 
 Integration tests (marked slow)
-    Require a live the vector store + SQLite corpus.
+    Require a live vector store + SQLite corpus.
     Ollama integration tests are skipped automatically when Ollama is offline.
 """
 
@@ -715,13 +715,13 @@ class TestGetPipelineSingleton:
 
 
 # ---------------------------------------------------------------------------
-# Integration tests (marked slow -- require live the vector store + SQLite)
+# Integration tests (marked slow -- require a live vector store + SQLite)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.slow
 class TestRAGPipelineIntegration:
     """
-    Tests that hit real storage layers (the vector store, SQLite) but do NOT
+    Tests that hit real storage layers (vector store, SQLite) but do NOT
     require Ollama.  They verify retrieval, prompt building, and citation
     engine all wire together correctly on live data.
     """
@@ -733,7 +733,7 @@ class TestRAGPipelineIntegration:
         reset_pipeline()
 
     def test_retrieval_only(self):
-        """Retriever returns results from live the vector store corpus."""
+        """Retriever returns results from the live corpus."""
         pipeline = RAGPipeline(PipelineConfig(use_reranker=False))
         response = pipeline._retrieve(
             "What is the attendance requirement?",
