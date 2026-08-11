@@ -60,7 +60,14 @@ def compute_confidence(
     if not results:
         return "0%", 0.0
 
-    best = results[0]
+    # FTS-only hits (Phase 2) carry distance=None -- not on the cosine scale,
+    # so they can't contribute here. results[0] is the best by fused rank,
+    # which may be an FTS-only hit; fall through to the first result that
+    # actually has a dense distance.
+    best = next((r for r in results if r.distance is not None), None)
+    if best is None:
+        return "0%", 0.0
+
     # Cosine similarity is 1.0 - distance
     similarity = 1.0 - best.distance
     

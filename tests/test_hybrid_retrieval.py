@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from retrieval.hybrid_search import RawSearchResult, BM25SearchBackend, DenseSearchBackend
 from retrieval.fusion import RecipRankFusion, RRF_K
-from retrieval.bm25 import _tokenize, _matches_where, BM25Index
+from retrieval.fts5 import _sanitize_query, ensure_schema, search as fts5_search
 from retrieval.reranker import CrossEncoderReranker, RERANKER_MODEL
 from retrieval.retrieval_schema import (
     RetrievalQuery,
@@ -30,172 +30,160 @@ from retrieval.retrieval_schema import (
 
 
 # ===========================================================================
-# BM25 tokenizer
+# FTS5 query sanitizer
 # ===========================================================================
 
-class TestBM25Tokenizer:
+class TestFTS5Sanitizer:
     def test_lowercases(self):
-        assert "admission" in _tokenize("ADMISSION")
-
-    def test_expands_hyphens(self):
-        tokens = _tokenize("sub-process")
-        assert "sub" in tokens
-        assert "process" in tokens
-
-    def test_expands_slashes(self):
-        tokens = _tokenize("fees/billing")
-        assert "fees" in tokens
-        assert "billing" in tokens
+        assert '"admission"' in _sanitize_query("ADMISSION")
 
     def test_removes_short_tokens(self):
-        tokens = _tokenize("a an the of")
-        assert all(len(t) >= 2 for t in tokens)
+        # "a" (length 1) is dropped; "an"/"the"/"of" (length 2-3) are kept --
+        # sanitization filters by length only, stopwording is a separate,
+        # unrelated concern (retriever.QueryPreprocessor).
+        expr = _sanitize_query("a an the of")
+        assert '"a"' not in expr.split(" OR ")
+        assert '"an"' in expr
 
     def test_keeps_numbers(self):
-        tokens = _tokenize("Section 8A Process 1.3")
-        assert "8a" in tokens or "8" in tokens
+        expr = _sanitize_query("Section 8A Process 1.3")
+        assert '"8a"' in expr or '"8"' in expr
 
     def test_empty_string(self):
-        assert _tokenize("") == []
+        assert _sanitize_query("") == ""
 
     def test_punctuation_only(self):
-        assert _tokenize("!!! ???") == []
+        assert _sanitize_query("!!! ???") == ""
 
     def test_domain_terms_preserved(self):
-        tokens = _tokenize("VIT examination committee HOD")
+        expr = _sanitize_query("VIT examination committee HOD")
         for t in ("vit", "examination", "committee", "hod"):
-            assert t in tokens
+            assert f'"{t}"' in expr
+
+    def test_query_syntax_characters_do_not_raise(self):
+        # These would be interpreted as FTS5 MATCH operators unquoted --
+        # sanitization must neutralize them, not just tolerate them.
+        for bad in ['what is "attendance"?', "sub-process 1.3", "fees/billing*", "NOT admissions"]:
+            expr = _sanitize_query(bad)
+            assert isinstance(expr, str)
+
+    def test_terms_joined_with_or(self):
+        expr = _sanitize_query("library book")
+        assert " OR " in expr
 
 
 # ===========================================================================
-# Where-clause interpreter
+# FTS5 search — unit tests against a throwaway SQLite file
 # ===========================================================================
 
-class TestWhereClauseInterpreter:
-    META = {
-        "access_level": "Public",
-        "department":   "Admissions",
-        "category":     "SOP",
-        "version":      "1.0",
-    }
-
-    def test_none_passes_all(self):
-        assert _matches_where(self.META, None) is True
-
-    def test_eq_match(self):
-        assert _matches_where(self.META, {"access_level": {"$eq": "Public"}}) is True
-
-    def test_eq_no_match(self):
-        assert _matches_where(self.META, {"access_level": {"$eq": "Admin"}}) is False
-
-    def test_in_match(self):
-        where = {"access_level": {"$in": ["Public", "Student"]}}
-        assert _matches_where(self.META, where) is True
-
-    def test_in_no_match(self):
-        where = {"access_level": {"$in": ["Admin", "Faculty"]}}
-        assert _matches_where(self.META, where) is False
-
-    def test_and_all_match(self):
-        where = {"$and": [
-            {"access_level": {"$eq": "Public"}},
-            {"department":   {"$eq": "Admissions"}},
-        ]}
-        assert _matches_where(self.META, where) is True
-
-    def test_and_one_fails(self):
-        where = {"$and": [
-            {"access_level": {"$eq": "Public"}},
-            {"department":   {"$eq": "Finance"}},
-        ]}
-        assert _matches_where(self.META, where) is False
-
-    def test_nested_and(self):
-        where = {"$and": [
-            {"access_level": {"$in": ["Public", "Student"]}},
-            {"category":     {"$eq": "SOP"}},
-            {"version":      {"$eq": "1.0"}},
-        ]}
-        assert _matches_where(self.META, where) is True
-
-    def test_missing_field_eq_fails(self):
-        assert _matches_where(self.META, {"nonexistent": {"$eq": "x"}}) is False
-
-    def test_missing_field_in_fails(self):
-        assert _matches_where(self.META, {"nonexistent": {"$in": ["x"]}}) is False
-
-
-# ===========================================================================
-# BM25Index — unit tests (no SQLite)
-# ===========================================================================
-
-class TestBM25IndexUnit:
+class TestFTS5Search:
     @pytest.fixture
-    def index(self):
-        """Build a tiny in-memory BM25 index without touching SQLite."""
-        from rank_bm25 import BM25Okapi
-        idx = BM25Index.__new__(BM25Index)
-        idx._model = None
-        idx._built = False
-
-        from retrieval.bm25 import CorpusEntry
-        corpus = [
-            CorpusEntry("c1", _tokenize("admission student fee"),    "Admission and student fee details",    {"department": "Admissions", "access_level": "Public"}),
-            CorpusEntry("c2", _tokenize("examination paper setting"), "Examination paper setting procedure",  {"department": "Examination", "access_level": "Public"}),
-            CorpusEntry("c3", _tokenize("library book issue return"), "Library book issue and return process", {"department": "Library Management", "access_level": "Public"}),
-            CorpusEntry("c4", _tokenize("admission committee VIT"),   "VIT admission committee process",      {"department": "Admissions", "access_level": "Public"}),
-            CorpusEntry("c5", _tokenize("security management campus"),"Campus security management SOP",      {"department": "Security Management", "access_level": "Student"}),
+    def conn(self, tmp_path):
+        """
+        A real (not :memory:) SQLite file with the `chunks` + `documents`
+        shape ensure_schema expects, seeded with a small fixed corpus.
+        File-based because the module under test opens its own connections
+        via ledger.get_connection() in the live path; here the fixture hands
+        a connection straight to fts5.search(), which is the unit under test.
+        """
+        import sqlite3
+        db_path = tmp_path / "test.db"
+        c = sqlite3.connect(str(db_path))
+        c.row_factory = sqlite3.Row
+        c.execute("""
+            CREATE TABLE documents (doc_id TEXT PRIMARY KEY, title TEXT)
+        """)
+        c.execute("""
+            CREATE TABLE chunks (
+                chunk_id TEXT PRIMARY KEY, doc_id TEXT, chunk_index INTEGER,
+                content TEXT, section_heading TEXT, category TEXT,
+                department TEXT, access_level TEXT, version TEXT,
+                source_file TEXT, total_chunks INTEGER
+            )
+        """)
+        rows = [
+            ("c1", "d1", "Admission and student fee details",    "Admissions",         "Public"),
+            ("c2", "d2", "Examination paper setting procedure",  "Examination",        "Public"),
+            ("c3", "d3", "Library book issue and return process", "Library Management", "Public"),
+            ("c4", "d1", "VIT admission committee process",      "Admissions",         "Public"),
+            ("c5", "d4", "Campus security management SOP",       "Security Management", "Student"),
         ]
-        idx._corpus = corpus
-        idx._model  = BM25Okapi([e.tokens for e in corpus])
-        idx._built  = True
-        return idx
+        for chunk_id, doc_id, content, dept, level in rows:
+            c.execute(
+                "INSERT OR IGNORE INTO documents VALUES (?, ?)",
+                (doc_id, f"Doc {doc_id}"),
+            )
+            c.execute(
+                "INSERT INTO chunks (chunk_id, doc_id, chunk_index, content, "
+                "section_heading, category, department, access_level, version, "
+                "source_file, total_chunks) VALUES (?, ?, 0, ?, '', 'SOP', ?, ?, '1.0', '', 1)",
+                (chunk_id, doc_id, content, dept, level),
+            )
+        c.commit()
+        ensure_schema(c)
+        yield c
+        c.close()
 
-    def test_search_returns_results(self, index):
-        results = index.search("admission fee", None, 3)
+    def test_search_returns_results(self, conn):
+        results = fts5_search(conn, "admission fee", "", [], 3)
         assert len(results) > 0
 
-    def test_search_top_result_relevant(self, index):
-        results = index.search("library book issue", None, 3)
+    def test_search_top_result_relevant(self, conn):
+        results = fts5_search(conn, "library book issue", "", [], 3)
         chunk_ids = [r[0] for r in results]
         assert "c3" in chunk_ids[:2]
 
-    def test_search_scores_normalized_0_1(self, index):
-        results = index.search("examination paper", None, 5)
+    def test_search_scores_normalized_0_1(self, conn):
+        results = fts5_search(conn, "examination paper", "", [], 5)
         for _, _, score, _ in results:
             assert 0.0 <= score <= 1.0
 
-    def test_search_rbac_filter(self, index):
-        where = {"access_level": {"$eq": "Public"}}
-        results = index.search("campus security student", where, 5)
-        # c5 has access_level=Student — should be filtered out
+    def test_search_rbac_filter(self, conn):
+        results = fts5_search(conn, "campus security student", "access_level = ?", ["Public"], 5)
         chunk_ids = [r[0] for r in results]
-        assert "c5" not in chunk_ids
+        assert "c5" not in chunk_ids  # c5 is access_level=Student
 
-    def test_search_department_filter(self, index):
-        where = {"department": {"$eq": "Admissions"}}
-        results = index.search("admission", where, 5)
+    def test_search_department_filter(self, conn):
+        results = fts5_search(conn, "admission", "department = ?", ["Admissions"], 5)
         for _, _, _, meta in results:
             assert meta["department"] == "Admissions"
 
-    def test_search_empty_query(self, index):
-        results = index.search("", None, 5)
-        assert results == []
+    def test_search_empty_query(self, conn):
+        assert fts5_search(conn, "", "", [], 5) == []
 
-    def test_search_n_results_respected(self, index):
-        results = index.search("admission", None, 2)
+    def test_search_n_results_respected(self, conn):
+        results = fts5_search(conn, "admission", "", [], 2)
         assert len(results) <= 2
 
-    def test_not_built_raises(self):
-        idx = BM25Index()
-        with pytest.raises(RuntimeError, match="not built"):
-            idx.search("query", None, 5)
+    def test_title_comes_from_documents_join(self, conn):
+        # The old bm25.py hardcoded title="" for every result because it
+        # never joined to `documents`; this is the fix.
+        results = fts5_search(conn, "admission fee", "", [], 5)
+        assert any(meta["title"] == "Doc d1" for _, _, _, meta in results)
 
-    def test_invalidate_resets_state(self, index):
-        assert index.is_built
-        index.invalidate()
-        assert not index.is_built
-        assert index.corpus_size == 0
+    def test_query_syntax_characters_do_not_crash_search(self, conn):
+        # End-to-end version of the sanitizer test: these used to raise
+        # inside sqlite3's MATCH parser and degrade the whole query to
+        # dense-only silently.
+        for bad in ['what is "admission"?', "fees/billing*", "NOT admission"]:
+            fts5_search(conn, bad, "", [], 5)  # must not raise
+
+    def test_delete_is_reflected_immediately(self, conn):
+        # The actual bug this phase fixes: no invalidate() to forget to
+        # call, no in-memory copy to fall out of sync. A delete on `chunks`
+        # is synced to chunks_fts by a trigger in the same transaction.
+        assert any(r[0] == "c1" for r in fts5_search(conn, "admission fee", "", [], 5))
+        conn.execute("DELETE FROM chunks WHERE chunk_id = 'c1'")
+        conn.commit()
+        assert not any(r[0] == "c1" for r in fts5_search(conn, "admission fee", "", [], 5))
+
+    def test_ensure_schema_is_idempotent(self, conn):
+        # Called on every app startup -- must not raise or duplicate rows
+        # on a table/triggers that already exist.
+        ensure_schema(conn)
+        ensure_schema(conn)
+        results = fts5_search(conn, "admission", "", [], 10)
+        assert len(results) <= 2  # c1, c4 -- not duplicated
 
 
 # ===========================================================================
@@ -429,11 +417,24 @@ class TestHybridRetrieverIntegration:
         assert r_dense.has_results
         assert r_hybrid.has_results
 
-    def test_bm25_index_built_after_first_query(self, retriever):
-        from retrieval.bm25 import get_bm25_index
-        retriever.retrieve_by_text("budget process", use_bm25=True, use_reranker=False, top_k_dense=5, top_k_bm25=5, top_k_fusion=5)
-        assert get_bm25_index().is_built
-        assert get_bm25_index().corpus_size == 627
+    def test_hybrid_query_uses_live_chunk_count(self, retriever):
+        # There is no singleton index to inspect any more (that was the bug);
+        # the meaningful assertion is that chunks_fts is in sync with the
+        # live `chunks` table, checked directly against the DB rather than
+        # any process-level cache.
+        import ledger
+        r = retriever.retrieve_by_text(
+            "budget process", use_bm25=True, use_reranker=False,
+            top_k_dense=5, top_k_bm25=5, top_k_fusion=5,
+        )
+        assert r.has_results
+        conn = ledger.get_connection()
+        try:
+            chunks_n = conn.execute("SELECT COUNT(*) AS n FROM chunks").fetchone()["n"]
+            fts_n    = conn.execute("SELECT COUNT(*) AS n FROM chunks_fts").fetchone()["n"]
+        finally:
+            conn.close()
+        assert fts_n == chunks_n
 
     def test_department_filter_works_in_hybrid_mode(self, retriever):
         r = retriever.retrieve_by_text(

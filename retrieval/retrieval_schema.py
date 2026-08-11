@@ -247,7 +247,7 @@ class RetrievalResult(BaseModel):
     chunk_id:      str            = Field(..., description="Deterministic 16-char chunk identifier.")
     content:       str            = Field(..., description="Raw chunk text passed to the LLM context window.")
     score:         float          = Field(..., description="Relevance score in [0, 1]. Higher is better.")
-    distance:      float          = Field(..., description="Cosine distance. Lower is more similar.")
+    distance:      Optional[float]= Field(default=None, description="Cosine distance. Lower is more similar. None for FTS-only (keyword) hits, which aren't on the cosine scale.")
     rerank_score:  Optional[float]= Field(default=None, description="Cross-encoder rerank score. None if reranker not used.")
     retrieval_mode: str           = Field(default="dense", description="'dense' | 'bm25' | 'hybrid' | 'hybrid+rerank'")
     citation:      SourceCitation = Field(..., description="Full source provenance.")

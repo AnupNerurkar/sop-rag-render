@@ -6,8 +6,8 @@ pydantic>=2.0
 # ── Text splitting ─────────────────────────────────────────────────────────────
 langchain-text-splitters>=0.3.0
 
-# ── Keyword retrieval ─────────────────────────────────────────────────────────
-rank-bm25>=0.2.2
+# ── Keyword retrieval is SQLite FTS5 (compiled into Python's stdlib sqlite3
+# ── module on a normal build) -- no package needed here.
 
 # ── Vector math (SQLite vector store brute-force cosine search) ───────────────
 numpy>=1.24

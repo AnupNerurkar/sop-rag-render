@@ -59,7 +59,11 @@ class RawSearchResult:
     chunk_id:     str
     content:      str
     score:        float          # Relevance score [0, 1]. Higher = better.
-    distance:     float          # Raw backend distance (cosine for dense, BM25 score for sparse).
+    distance:     Optional[float]  # Cosine distance for dense hits; None for FTS-only hits
+                                    # (a BM25/FTS score is not on the same scale as cosine
+                                    # distance -- synthesizing one, as the old code did with
+                                    # `1.0 - norm_score`, corrupted confidence and thresholding
+                                    # with a value that only looked like a real distance).
     metadata:     dict           = field(default_factory=dict)
     backend:      str            = "dense"  # "dense" | "bm25" | "hybrid" | "hybrid+rerank"
     rerank_score: Optional[float]= None     # Set by reranker.py after cross-encoder scoring
@@ -158,13 +162,18 @@ class DenseSearchBackend(BaseSearchBackend):
 
 
 # ---------------------------------------------------------------------------
-# BM25 backend stub (future Phase 6.5)
+# BM25 backend (SQLite FTS5)
 # ---------------------------------------------------------------------------
 
 class BM25SearchBackend(BaseSearchBackend):
     """
-    Keyword-based BM25 retrieval using rank_bm25.
-    Delegates to retrieval.bm25.BM25Index (lazy-loaded SQLite corpus).
+    Keyword retrieval via SQLite FTS5 (retrieval/fts5.py).
+
+    Class name kept as BM25SearchBackend even though the implementation is
+    FTS5 -- callers (Retriever, evaluate_retrieval.py) refer to this as "the
+    keyword backend" / "bm25 mode", and FTS5's own ranking function is also
+    called bm25(). Renaming would touch a lot of call sites for a label with
+    no behavioral consequence.
     """
 
     @property
@@ -179,21 +188,29 @@ class BM25SearchBackend(BaseSearchBackend):
         n_results:    int,
     ) -> list[RawSearchResult]:
         """
-        Runs BM25 keyword search.
+        Runs FTS5 keyword search.
         Uses query_text; query_vector is ignored.
-        where_clause is interpreted by the BM25 post-filter.
+        where_clause is translated to SQL and applied as a JOIN predicate
+        (see retrieval/fts5.py), not a Python post-filter.
         """
-        from retrieval.bm25 import get_bm25_index
+        import ledger
+        from retrieval import fts5
+        from vector_store.sqlite_store import _where_clause_to_sql
 
-        index = get_bm25_index()
-        raw = index.search(query_text, where_clause, n_results)
+        where_sql, where_params = _where_clause_to_sql(where_clause)
+
+        conn = ledger.get_connection()
+        try:
+            raw = fts5.search(conn, query_text, where_sql, where_params, n_results)
+        finally:
+            conn.close()
 
         return [
             RawSearchResult(
                 chunk_id = chunk_id,
                 content  = content,
                 score    = norm_score,
-                distance = 1.0 - norm_score,   # pseudo-distance for interface consistency
+                distance = None,   # FTS score isn't on the cosine scale -- see RawSearchResult.distance
                 metadata = metadata,
                 backend  = "bm25",
             )

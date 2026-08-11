@@ -11,6 +11,10 @@ Exports:
     RetrievalResult    — single ranked result
     RetrievalFilter    — optional metadata pre-filters
     SourceCitation     — source provenance model
+
+Keyword search is SQLite FTS5 (retrieval/fts5.py), not a process-level
+index -- there is no singleton to import here. See fts5.ensure_schema /
+fts5.search.
 """
 
 from retrieval.retrieval_schema import (
@@ -21,7 +25,6 @@ from retrieval.retrieval_schema import (
     SourceCitation,
 )
 from retrieval.retriever import Retriever, get_retriever
-from retrieval.bm25 import BM25Index, get_bm25_index
 from retrieval.fusion import RecipRankFusion
 from retrieval.reranker import CrossEncoderReranker, get_reranker
 
@@ -29,7 +32,6 @@ __all__ = [
     "Retriever", "get_retriever",
     "RetrievalQuery", "RetrievalResponse", "RetrievalResult",
     "RetrievalFilter", "SourceCitation",
-    "BM25Index", "get_bm25_index",
     "RecipRankFusion",
     "CrossEncoderReranker", "get_reranker",
 ]

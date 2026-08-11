@@ -100,8 +100,15 @@ def on_startup():
     try:
         import ledger
         from vector_store.sqlite_store import get_vector_store
-        
+
         ledger.initialize_db()
+
+        from retrieval.fts5 import ensure_schema as ensure_fts5_schema
+        _fts5_conn = ledger.get_connection()
+        try:
+            ensure_fts5_schema(_fts5_conn)
+        finally:
+            _fts5_conn.close()
         docs = ledger.get_all_documents()
         total_docs = len(docs)
         existing_files = 0
