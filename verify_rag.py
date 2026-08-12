@@ -76,45 +76,33 @@ def _run_check(name: str, fn) -> bool:
         return False
 
 
-def check_ollama() -> None:
-    """Check 1: Ollama server reachable."""
-    _section("Check 1 -- Ollama Server")
+def check_generation_backend() -> None:
+    """
+    Check 1/2: the LLM backend that LLM_BACKEND actually selects generates
+    text. Previously two separate checks hardcoded Ollama regardless of
+    which backend was configured -- on a box running LLM_BACKEND=groq (this
+    one), that meant two permanently-failing checks for a backend that was
+    never supposed to be active, while the backend actually in use went
+    unverified. See rag/rag_engine.py's get_rag_engine() for the same
+    backend-selection logic this mirrors.
+    """
+    backend = os.environ.get("LLM_BACKEND", "ollama").strip().lower()
+    _section(f"Check 1/2 -- Generation Backend (LLM_BACKEND={backend})")
     try:
-        from rag.ollama_client import get_ollama_client, OllamaConfig
-        client = get_ollama_client()
-        alive  = client.health_check()
-        if not alive:
-            raise RuntimeError("health_check() returned False")
-        _check("Ollama server reachable", True)
-        _RESULTS["Ollama server"] = True
-    except Exception as exc:
-        _check("Ollama server reachable", False, str(exc)[:80])
-        _RESULTS["Ollama server"] = False
-
-
-def check_qwen2_5() -> None:
-    """Check 2: qwen2.5:7b model available via Ollama."""
-    _section("Check 2 -- Qwen2.5:7b Model")
-    if not _RESULTS.get("Ollama server"):
-        _check("qwen2.5:7b available", False, "skipped -- Ollama not reachable")
-        _RESULTS["Qwen2.5 model"] = False
-        return
-    try:
-        from rag.ollama_client import get_ollama_client
-        client = get_ollama_client()
-        result = client.chat(
+        from rag.rag_engine import get_rag_engine
+        engine = get_rag_engine()
+        result = engine.client.chat(
             [{"role": "user", "content": "Reply with the single word: OK"}],
             temperature=0.0,
             max_tokens=5,
-            top_p=1.0,
-            repeat_penalty=1.0,
         )
         answer = result.get("answer", "").strip()
-        _check("qwen2.5:7b generates text", True, f'reply={answer!r}')
-        _RESULTS["Qwen2.5 model"] = True
+        model = getattr(engine.client, "model", backend)
+        _check(f"{backend} generates text", True, f"model={model} reply={answer!r}")
+        _RESULTS["Generation backend"] = True
     except Exception as exc:
-        _check("qwen2.5:7b generates text", False, str(exc)[:80])
-        _RESULTS["Qwen2.5 model"] = False
+        _check(f"{backend} generates text", False, str(exc)[:80])
+        _RESULTS["Generation backend"] = False
 
 
 def check_embedding_model() -> None:
@@ -333,8 +321,8 @@ _SAMPLE_QUERIES = [
 def run_e2e_queries() -> None:
     _section("Check 11 -- End-to-End RAG Pipeline")
 
-    if not _RESULTS.get("Qwen2.5 model"):
-        _check("End-to-end RAG", False, "skipped -- Qwen2.5 not available")
+    if not _RESULTS.get("Generation backend"):
+        _check("End-to-end RAG", False, "skipped -- generation backend not available")
         _RESULTS["End-to-end RAG"] = False
         return
 
@@ -425,9 +413,10 @@ def print_summary() -> int:
     if passed == total:
         print(Fore.GREEN + Style.BRIGHT + "  ALL CHECKS PASSED".center(W))
         print(Fore.GREEN + "  System is ready for FastAPI integration.".center(W))
-    elif _RESULTS.get("Ollama server") is False:
+    elif _RESULTS.get("Generation backend") is False:
+        backend = os.environ.get("LLM_BACKEND", "ollama").strip().lower()
         print(Fore.YELLOW + Style.BRIGHT + "  Core pipeline READY".center(W))
-        print(Fore.YELLOW + "  Start Ollama and run again for end-to-end verification.".center(W))
+        print(Fore.YELLOW + f"  Fix the {backend} backend and run again for end-to-end verification.".center(W))
     else:
         print(Fore.RED + Style.BRIGHT + f"  {total - passed} check(s) failed.".center(W))
         print(Fore.RED + "  Review errors above before proceeding.".center(W))
@@ -444,8 +433,7 @@ def print_summary() -> int:
 def main() -> int:
     _header("VIT AGENTIC AI -- RAG PIPELINE VERIFICATION")
 
-    check_ollama()
-    check_qwen2_5()
+    check_generation_backend()
     check_embedding_model()
     check_reranker()
     check_sqlite()

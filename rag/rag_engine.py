@@ -98,6 +98,14 @@ class RAGEngine:
     def __init__(self, client: Optional[OllamaClient] = None) -> None:
         self._client = client or get_ollama_client()
 
+    @property
+    def client(self):
+        """The active backend client (whichever LLM_BACKEND selected -- see
+        get_rag_engine() below). Public so diagnostics (verify_rag.py) can
+        probe the real active backend instead of reaching into a private
+        attribute or hardcoding an assumption about which one is live."""
+        return self._client
+
     # ------------------------------------------------------------------
     # Non-streaming
     # ------------------------------------------------------------------

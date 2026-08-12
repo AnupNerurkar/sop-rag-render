@@ -13,7 +13,7 @@ Model hierarchy
     PromptConfig        — configurable knobs passed to PromptBuilder.build()
     ContextChunk        — one prepared chunk ready for the context block
     ConflictGroup       — detected version conflict across chunks
-    BuiltPrompt         — the fully assembled prompt, ready for Qwen2.5:7B
+    BuiltPrompt         — the fully assembled prompt, ready for the active LLM backend
 
 LangGraph note:
     BuiltPrompt.messages is list[dict] in Ollama/OpenAI chat format.
@@ -173,7 +173,8 @@ class PromptConfig(BaseModel):
 
 class BuiltPrompt(BaseModel):
     """
-    The fully assembled prompt, ready for the Qwen2.5:7B Ollama call (Phase 9).
+    The fully assembled prompt, ready for the active LLM backend (LLM_BACKEND
+    selects it -- see rag/rag_engine.py; Groq in production).
 
     Primary consumer interface
     --------------------------

@@ -30,7 +30,6 @@ from retrieval.hybrid_search import (
     RawSearchResult,
     DenseSearchBackend,
     BM25SearchBackend,
-    HybridSearchEngine,
 )
 from retrieval.retriever import QueryPreprocessor, _build_citation
 
@@ -302,42 +301,10 @@ class TestBM25SearchBackend:
         assert BM25SearchBackend().backend_name == "bm25"
 
 
-class TestHybridSearchEngineAlpha:
-    def test_alpha_one_returns_dense_only(self):
-        engine = HybridSearchEngine(alpha=1.0)
-        assert engine._alpha == 1.0
-
-    def test_rrf_fuse_combines_scores(self):
-        engine = HybridSearchEngine(alpha=0.5)
-        dense = [
-            RawSearchResult("c1", "text1", 0.9, 0.1),
-            RawSearchResult("c2", "text2", 0.8, 0.2),
-        ]
-        bm25 = [
-            RawSearchResult("c2", "text2", 0.85, 0.15),
-            RawSearchResult("c3", "text3", 0.75, 0.25),
-        ]
-        fused = engine._rrf_fuse(dense, bm25, n_results=3)
-        chunk_ids = [r.chunk_id for r in fused]
-        # c2 appears in both → should rank high
-        assert "c2" in chunk_ids
-        assert len(fused) <= 3
-
-    def test_rrf_fuse_no_duplicates(self):
-        engine = HybridSearchEngine(alpha=0.5)
-        dense = [RawSearchResult(f"c{i}", f"text{i}", 0.9 - i*0.1, i*0.1) for i in range(5)]
-        bm25  = [RawSearchResult(f"c{i}", f"text{i}", 0.9 - i*0.1, i*0.1) for i in range(5)]
-        fused = engine._rrf_fuse(dense, bm25, n_results=5)
-        ids = [r.chunk_id for r in fused]
-        assert len(ids) == len(set(ids)), "Duplicate chunk_ids in fused results"
-
-    def test_rrf_backend_label(self):
-        engine = HybridSearchEngine(alpha=0.5)
-        dense = [RawSearchResult("c1", "t", 0.9, 0.1)]
-        bm25  = [RawSearchResult("c2", "t", 0.8, 0.2)]
-        fused = engine._rrf_fuse(dense, bm25, n_results=2)
-        for r in fused:
-            assert r.backend == "hybrid"
+# HybridSearchEngine (a second, duplicate RRF implementation, never
+# instantiated anywhere in the app -- retriever.py fuses via retrieval/
+# fusion.py's RecipRankFusion instead) was removed in Phase 8, along with
+# its dedicated tests that lived here.
 
 
 # ===========================================================================

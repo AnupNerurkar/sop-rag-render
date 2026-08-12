@@ -391,7 +391,7 @@ def section_6(results: list) -> object:
         print(f"  {Fore.CYAN}-- User message (first 200 chars) --{Style.RESET_ALL}")
         print(f"  {Fore.WHITE + Style.DIM}{usr_preview}...{Style.RESET_ALL}")
         print()
-        print(f"  {Fore.GREEN}NOTE: LLM not called. Prompt is ready for Qwen2.5:7B.{Style.RESET_ALL}")
+        print(f"  {Fore.GREEN}NOTE: LLM not called. Prompt is ready for the active LLM_BACKEND.{Style.RESET_ALL}")
 
         return prompt
 
@@ -485,7 +485,7 @@ def section_9() -> None:
         ("Hybrid Retrieval",            "dense + SQLite FTS5 + RRF"),
         ("Reranker",                    "Groq listwise (one extra chat call)"),
         ("Prompt Builder",              "system + context + question"),
-        ("Qwen2.5:7B  (Ollama)",        "local LLM, no data leaves campus"),
+        ("Generation",                  "Groq (LLM_BACKEND selects the active backend)"),
         ("Citation Engine",             "dedup, version-prefer, inline refs"),
         ("FastAPI  (Phase 9)",          "REST endpoints + RBAC"),
         ("LangGraph Agents (Phase 10)", "multi-step agentic workflows"),
@@ -540,8 +540,8 @@ def section_10(s1: dict, s3: dict, s4: dict) -> None:
     _row("Average chunks/document", avg_per_doc)
     _row("Average chunk size",      f"{avg_size:.0f} chars" if avg_size else "N/A")
     _row("Embedding model",         model)
-    _row("LLM model",               "Qwen2.5:7B  (via Ollama)")
-    _row("Vector database",         "the vector store  (PersistentClient)")
+    _row("LLM model",               f"Groq {os.environ.get('GROQ_MODEL', 'llama-3.1-8b-instant')}")
+    _row("Vector database",         "SQLite (local, brute-force cosine)")
     _row("SQLite ledger size",      _fmt_bytes(db_size))
     _row("Vector store size",         _fmt_bytes(store_size))
 

@@ -1,37 +1,17 @@
 """
 retrieval/hybrid_search.py
 ---------------------------
-Phase 6: Search Backend Abstraction (BM25-Ready)
-
-Defines the interface that all search backends implement, plus the
-HybridSearchEngine that combines them.
-
-Current state  : DenseSearchBackend only (the vector store + BGE vectors).
-Future state   : BM25SearchBackend (SQLite FTS or rank_bm25) + RRF fusion.
-
-Architecture:
-
-    HybridSearchEngine
-        │
-        ├── DenseSearchBackend   ← active now
-        │       └── SQLiteVectorStore.query_with_filter()
-        │
-        └── BM25SearchBackend    ← STUB (raises NotImplementedError)
-                └── SQLite FTS / rank_bm25  (Phase 6.5 or later)
-
-Hybrid score fusion (when BM25 is added):
-    Reciprocal Rank Fusion (RRF):
-        score(d) = Σ_b  1 / (k + rank_b(d))     k=60 (standard default)
-    Or weighted linear combination:
-        score(d) = alpha * dense_score + (1 - alpha) * bm25_score
-
-    alpha is configurable (default 1.0 = dense only until BM25 is implemented).
+Search backend implementations: DenseSearchBackend (the vector store +
+BGE) and BM25SearchBackend (SQLite FTS5, despite the class name -- see its
+own docstring). Both implement the same BaseSearchBackend interface so
+retrieval/retriever.py can call either uniformly; retriever.py runs both
+and fuses the results itself via retrieval/fusion.py's RecipRankFusion
+(Reciprocal Rank Fusion, k=60) -- that fusion is not done in this module.
 
 Interface contract:
     BaseSearchBackend.search(query_text, query_vector, where_clause, n_results)
         → list[RawSearchResult]
 
-    Both dense and BM25 backends implement this interface.
     Dense backend uses query_vector; ignores query_text.
     BM25  backend uses query_text;   ignores query_vector (and where_clause format).
 """
@@ -217,108 +197,8 @@ class BM25SearchBackend(BaseSearchBackend):
             for chunk_id, content, norm_score, metadata in raw
         ]
 
-
-# ---------------------------------------------------------------------------
-# Hybrid search engine
-# ---------------------------------------------------------------------------
-
-class HybridSearchEngine:
-    """
-    Combines multiple search backends with configurable fusion.
-
-    Current state (alpha=1.0): delegates entirely to DenseSearchBackend.
-    When BM25 is implemented, set alpha < 1.0 to enable fusion.
-
-    Fusion strategy: Reciprocal Rank Fusion (RRF)
-        final_score(d) = Σ_b  1 / (RRF_K + rank_b(d))
-        where RRF_K=60 is the standard constant that limits the influence
-        of very high-ranked documents.
-
-    Args:
-        alpha:       Weight of dense scores in [0, 1]. 1.0 = dense only.
-        rrf_k:       RRF constant. Default 60 (standard literature value).
-        dense_extra: Multiplier on n_results passed to dense backend to ensure
-                     enough candidates for fusion. Default 2.
-    """
-
-    RRF_K = 60
-
-    def __init__(
-        self,
-        alpha:       float = 1.0,
-        dense_extra: int   = 2,
-    ) -> None:
-        self._alpha       = alpha
-        self._dense_extra = dense_extra
-        self._dense       = DenseSearchBackend()
-        self._bm25        = BM25SearchBackend()
-
-    def search(
-        self,
-        query_text:   str,
-        query_vector: list[float],
-        where_clause: Optional[dict],
-        n_results:    int,
-    ) -> list[RawSearchResult]:
-        """
-        Runs the configured backends and returns fused, ranked results.
-
-        With alpha=1.0 (default): pure dense retrieval, no fusion overhead.
-        With alpha<1.0: RRF fusion across dense + BM25 results.
-        """
-        if self._alpha >= 1.0 or self._alpha < 0.0:
-            # Pure dense — no fusion needed
-            return self._dense.search(query_text, query_vector, where_clause, n_results)
-
-        # --- Hybrid path (BM25 not yet implemented — guard) ---
-        fetch_k = n_results * self._dense_extra
-
-        dense_results = self._dense.search(query_text, query_vector, where_clause, fetch_k)
-        try:
-            bm25_results = self._bm25.search(query_text, query_vector, where_clause, fetch_k)
-        except NotImplementedError:
-            logger.warning(
-                "[HYBRID] BM25 backend not implemented; falling back to dense-only."
-            )
-            return dense_results[:n_results]
-
-        return self._rrf_fuse(dense_results, bm25_results, n_results)
-
-    def _rrf_fuse(
-        self,
-        dense_results: list[RawSearchResult],
-        bm25_results:  list[RawSearchResult],
-        n_results:     int,
-    ) -> list[RawSearchResult]:
-        """
-        Reciprocal Rank Fusion over two ranked result lists.
-
-        For each unique chunk, sums   1/(RRF_K + rank)   across backends.
-        Re-ranks by fused score. Preserves metadata from dense results
-        (they carry full the vector store metadata).
-        """
-        scores: dict[str, float] = {}
-        meta:   dict[str, RawSearchResult] = {}
-
-        for rank, r in enumerate(dense_results, start=1):
-            scores[r.chunk_id] = scores.get(r.chunk_id, 0.0) + (1.0 / (self.RRF_K + rank))
-            meta[r.chunk_id]   = r
-
-        for rank, r in enumerate(bm25_results, start=1):
-            scores[r.chunk_id] = scores.get(r.chunk_id, 0.0) + (1.0 / (self.RRF_K + rank))
-            if r.chunk_id not in meta:
-                meta[r.chunk_id] = r
-
-        fused = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)[:n_results]
-
-        return [
-            RawSearchResult(
-                chunk_id = cid,
-                content  = meta[cid].content,
-                score    = round(score, 6),
-                distance = meta[cid].distance,
-                metadata = meta[cid].metadata,
-                backend  = "hybrid",
-            )
-            for cid, score in fused
-        ]
+# HybridSearchEngine (a second, duplicate RRF implementation with its own
+# alpha-weighted fusion) was removed in Phase 8 -- never instantiated
+# anywhere; retrieval/retriever.py calls DenseSearchBackend and
+# BM25SearchBackend directly and does its own fusion via retrieval/fusion.py's
+# RecipRankFusion, which is what's actually live.

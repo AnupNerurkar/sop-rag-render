@@ -10,8 +10,8 @@ Responsibility:
   - Keep all AI logic inside rag_pipeline.py — this module only translates
 
 Public API:
-  query(question, role)          → dict  (non-streaming)
-  stream_tokens(question, role)  → Iterator[str]  (streaming)
+  query(question, role)             → dict  (non-streaming)
+  stream_structured(question, role) → Iterator[tuple]  (streaming, with citations)
 """
 
 from __future__ import annotations
@@ -115,20 +115,6 @@ def query(question: str, role: str) -> dict:
             "model_name":         "unavailable",
             "template_used":      "none",
         }
-
-
-def stream_tokens(question: str, role: str) -> Iterator[str]:
-    """
-    Yields raw text tokens from the RAG streaming pipeline.
-    Used by the SSE endpoint in app.py.
-    """
-    try:
-        from rag_pipeline import get_pipeline
-        pipeline = get_pipeline()
-        yield from pipeline.run_stream(question, role)
-    except Exception as exc:
-        logger.error("[RAG_INTEGRATION] pipeline.run_stream() failed: %s", exc, exc_info=True)
-        yield "[Error: knowledge base temporarily unavailable]"
 
 
 def stream_structured(question: str, role: str) -> Iterator[tuple]:

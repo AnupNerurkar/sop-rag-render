@@ -35,6 +35,7 @@ from rag_pipeline import (
     PipelineConfig,
     RAGPipeline,
     _normalize_role,
+    _SourceMarkerSuppressor,
     get_pipeline,
     reset_pipeline,
 )
@@ -641,57 +642,172 @@ class TestRAGPipelineUnit:
         assert resp.retrieved_chunks == 2
 
 
-# ---------------------------------------------------------------------------
-# TestRAGPipelineStream
-# ---------------------------------------------------------------------------
+# TestRAGPipelineStream (run_stream(), tokens-only) was removed in Phase 8
+# along with run_stream() itself -- see rag_pipeline.py. run_stream_structured()
+# -- the only streaming path now, and what every SSE endpoint actually uses --
+# is covered below.
 
-class TestRAGPipelineStream:
+
+class TestSourceMarkerSuppressor:
+    """
+    Unit tests for the buffer that withholds [SOURCE N] markers from the
+    live token stream (rag_pipeline._SourceMarkerSuppressor). Feeding one
+    token at a time simulates how the real generator delivers text --
+    a marker can arrive split across many small chunks.
+    """
+
+    def _feed_all(self, sup: _SourceMarkerSuppressor, tokens: list[str]) -> str:
+        out = "".join(sup.feed(t) for t in tokens)
+        return out + sup.flush()
+
+    def test_plain_text_passes_through_immediately(self):
+        sup = _SourceMarkerSuppressor()
+        assert sup.feed("Hello world") == "Hello world"
+        assert sup.flush() == ""
+
+    def test_single_marker_fully_suppressed(self):
+        sup = _SourceMarkerSuppressor()
+        out = self._feed_all(sup, ["See ", "[SOURCE 1]", " for details."])
+        assert out == "See  for details."
+        assert "SOURCE" not in out
+
+    def test_marker_split_across_many_tiny_tokens(self):
+        # Realistic streaming: a real LLM client can yield one character,
+        # or one sub-word piece, at a time.
+        sup = _SourceMarkerSuppressor()
+        tokens = list("Before [SOURCE 12] after")
+        out = self._feed_all(sup, tokens)
+        assert out == "Before  after"
+
+    def test_bundled_marker_fully_suppressed(self):
+        # The bundled form the model sometimes emits -- caught live during
+        # this phase; the suppressor must recognize it too, not just
+        # citation_engine's marker resolution.
+        sup = _SourceMarkerSuppressor()
+        out = self._feed_all(sup, ["Confirmed ", "[SOURCE 1, SOURCE 2]", "."])
+        assert out == "Confirmed ."
+
+    def test_bracket_that_is_not_a_marker_passes_through(self):
+        sup = _SourceMarkerSuppressor()
+        out = self._feed_all(sup, ["See [Appendix A] for details."])
+        assert out == "See [Appendix A] for details."
+
+    def test_unterminated_long_bracket_eventually_flushed(self):
+        # A '[SOURCE' that never closes (not a real marker) must not be
+        # buffered forever -- the safety valve flushes it as plain text.
+        sup = _SourceMarkerSuppressor()
+        out = self._feed_all(sup, ["[SOURCE " + "x" * 40])
+        assert "SOURCE" in out  # flushed, not silently dropped
+
+    def test_multiple_markers_all_suppressed(self):
+        sup = _SourceMarkerSuppressor()
+        out = self._feed_all(sup, ["A [SOURCE 1] and B [SOURCE 2] agree."])
+        assert out == "A  and B  agree."
+
+
+class TestRAGPipelineStreamStructured:
+    """
+    run_stream_structured() is what every SSE endpoint actually uses.
+    Verifies the relevance gate applies here too (Phase 4), that markers
+    are suppressed on the wire while the final meta event carries the
+    fully-resolved text (Phase 5 streaming parity), and that the meta
+    payload's new fields are populated.
+    """
+
     @pytest.fixture(autouse=True)
     def reset(self):
         reset_pipeline()
         yield
         reset_pipeline()
 
-    def test_stream_no_results_yields_fallback(self):
+    def _run(self, results, answer_tokens):
+        mock_bp = _make_built_prompt()
+        mock_eng = MagicMock()
+        mock_eng.generate_stream.return_value = iter(answer_tokens)
+        mock_cite = MagicMock()
+
+        pipeline = RAGPipeline()
+        with (
+            patch("rag_pipeline.RAGPipeline._retrieve",
+                  return_value=_make_retrieval_response(results)),
+            patch("rag.prompt_builder.build_prompt", return_value=mock_bp),
+            patch("rag.rag_engine.get_rag_engine", return_value=mock_eng),
+        ):
+            events = list(pipeline.run_stream_structured("Test", role="Student"))
+        return events
+
+    def test_relevance_gate_short_circuits_before_generation(self):
+        # score=0.10 -> similarity well below RELEVANCE_FLOOR (default 0.60).
+        # The mock engine is never even reached if this works -- there is
+        # no patch for rag.rag_engine.get_rag_engine here on purpose.
+        pipeline = RAGPipeline()
+        with patch(
+            "rag_pipeline.RAGPipeline._retrieve",
+            return_value=_make_retrieval_response([_make_result("doc1", score=0.10)]),
+        ):
+            events = list(pipeline.run_stream_structured("Test"))
+
+        kinds = [k for k, _ in events]
+        assert kinds == ["token", "meta"]
+        assert events[0][1] == FALLBACK_ANSWER
+        assert events[1][1]["citations"] == []
+        assert events[1][1]["confidence"] == "0%"
+
+    def test_no_results_short_circuits(self):
         pipeline = RAGPipeline()
         with patch(
             "rag_pipeline.RAGPipeline._retrieve",
             return_value=_make_retrieval_response([]),
         ):
-            tokens = list(pipeline.run_stream("Test"))
-        assert tokens == [FALLBACK_ANSWER]
+            events = list(pipeline.run_stream_structured("Test"))
+        assert events[0] == ("token", FALLBACK_ANSWER)
+        assert events[-1][1]["citations"] == []
 
-    def test_stream_yields_tokens(self):
-        mock_bp  = _make_built_prompt()
+    def test_markers_suppressed_on_the_wire(self):
+        results = [_make_result("doc1", score=0.90)]
+        events = self._run(results, ["Answer ", "[SOURCE 1]", " here."])
+        token_text = "".join(p for k, p in events if k == "token")
+        assert "SOURCE" not in token_text
+        assert token_text == "Answer  here."
+
+    def test_meta_carries_resolved_answer_with_refs(self):
+        results = [_make_result("doc1", score=0.90)]
+        events = self._run(results, ["Answer ", "[SOURCE 1]", " here."])
+        meta = events[-1][1]
+        assert "SOURCE" not in meta["answer_with_refs"]
+        assert "[1]" in meta["answer_with_refs"]
+        assert meta["formatted_answer"].startswith(meta["answer_with_refs"])
+
+    def test_meta_has_rerank_method_and_citations_inferred(self):
+        results = [_make_result("doc1", score=0.90)]
+        events = self._run(results, ["No markers here."])
+        meta = events[-1][1]
+        assert "rerank_method" in meta
+        assert "citations_inferred" in meta
+        # No [SOURCE N] markers emitted -> fallback citation selection.
+        assert meta["citations_inferred"] is True
+
+    def test_confidence_identical_to_non_streaming(self):
+        # compute_confidence is a retrieval signal, independent of the
+        # generated text -- same results should give the same number via
+        # either path.
+        results = [_make_result("doc1", score=0.90)]
+        stream_events = self._run(results, ["Some answer."])
+        stream_conf = stream_events[-1][1]["confidence"]
+
+        mock_bp = _make_built_prompt()
         mock_eng = MagicMock()
-        mock_eng.generate_stream.return_value = iter(["Hello", " World", "!"])
-
+        mock_eng.generate.return_value = _make_rag_response("Some answer.")
         pipeline = RAGPipeline()
         with (
             patch("rag_pipeline.RAGPipeline._retrieve",
-                  return_value=_make_retrieval_response([_make_result()])),
+                  return_value=_make_retrieval_response(results)),
             patch("rag.prompt_builder.build_prompt", return_value=mock_bp),
             patch("rag.rag_engine.get_rag_engine", return_value=mock_eng),
         ):
-            tokens = list(pipeline.run_stream("Test", role="Student"))
+            run_resp = pipeline.run("Test", role="Student")
 
-        assert tokens == ["Hello", " World", "!"]
-
-    def test_stream_does_not_call_citation_engine(self):
-        mock_bp  = _make_built_prompt()
-        mock_eng = MagicMock()
-        mock_eng.generate_stream.return_value = iter(["token"])
-
-        pipeline = RAGPipeline()
-        with (
-            patch("rag_pipeline.RAGPipeline._retrieve",
-                  return_value=_make_retrieval_response([_make_result()])),
-            patch("rag.prompt_builder.build_prompt", return_value=mock_bp),
-            patch("rag.rag_engine.get_rag_engine", return_value=mock_eng),
-            patch("rag.citation_engine.get_citation_engine") as mock_cite_factory,
-        ):
-            list(pipeline.run_stream("Test"))
-            mock_cite_factory.assert_not_called()
+        assert stream_conf == run_resp.confidence
 
 
 # ---------------------------------------------------------------------------

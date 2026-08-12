@@ -47,9 +47,11 @@ Design choices
   Per-call overrides are passed as a separate PipelineConfig instance;
   the pipeline's own config is never mutated.
 
-* Streaming: run_stream() yields LLM text tokens as they arrive.
-  It does NOT run the citation engine (which needs the complete answer).
-  For callers that need citations, use run() instead.
+* Streaming: run_stream_structured() yields live tokens plus a final
+  metadata event (citations, confidence) once the complete answer is
+  known -- see its own docstring. Every SSE endpoint uses this; there is
+  no tokens-only streaming path any more (run_stream() was removed in
+  Phase 8, dead since its only caller was itself unreferenced).
 
 LangGraph note:
   PipelineConfig, RAGPipeline, and RAGPipelineResponse are all designed
@@ -293,9 +295,10 @@ class RAGPipeline:
         response = pipeline.run("What is the attendance policy?", role="Student")
         print(response.formatted_answer)
 
-    Streaming (text tokens only, no citations):
-        for token in pipeline.run_stream("Summarise fee policy", role="Faculty"):
-            print(token, end="", flush=True)
+    Streaming (tokens live, citations once the answer completes):
+        for kind, payload in pipeline.run_stream_structured("Summarise fee policy", role="Faculty"):
+            if kind == "token": print(payload, end="", flush=True)
+            else: print(payload["formatted_answer"])  # kind == "meta"
     """
 
     def __init__(self, config: Optional[PipelineConfig] = None) -> None:
@@ -437,43 +440,11 @@ class RAGPipeline:
     # Streaming API -- yields text tokens, no citation processing
     # ------------------------------------------------------------------
 
-    def run_stream(
-        self,
-        question: str,
-        role: str = "Public",
-        *,
-        config_overrides: Optional[PipelineConfig] = None,
-    ) -> Iterator[str]:
-        """
-        Streaming variant -- yields LLM text tokens as they arrive.
-
-        Citation processing is skipped on this path because the citation
-        engine requires the complete answer text.  Use run() for citations.
-
-        Yields:
-            str -- incremental text tokens from Qwen2.5:7B.
-        """
-        cfg  = config_overrides or self._config
-        role = _normalize_role(role)
-
-        retrieval_response = self._retrieve(question, role, cfg)
-        results            = retrieval_response.results
-
-        if not results:
-            yield FALLBACK_ANSWER
-            return
-
-        from rag.prompt_builder import build_prompt
-        from rag.rag_engine     import get_rag_engine
-
-        built_prompt = build_prompt(question, results, cfg.to_prompt_config())
-        yield from get_rag_engine().generate_stream(
-            built_prompt,
-            temperature    = cfg.temperature,
-            max_tokens     = cfg.max_tokens,
-            top_p          = cfg.top_p,
-            repeat_penalty = cfg.repeat_penalty,
-        )
+    # run_stream() (tokens-only, no citations) was removed in Phase 8:
+    # its only caller, backend/rag_integration.stream_tokens(), itself had
+    # no caller anywhere in backend/app.py or the frontend -- both were
+    # superseded by run_stream_structured(), which every SSE endpoint
+    # actually uses.
 
     # ------------------------------------------------------------------
     # Streaming API (structured) -- yields live tokens AND final metadata
@@ -487,12 +458,11 @@ class RAGPipeline:
         config_overrides: Optional[PipelineConfig] = None,
     ) -> Iterator[tuple]:
         """
-        Live-streaming variant that ALSO surfaces citations + confidence.
-
-        Unlike run_stream() (tokens only) this drives the same retrieve →
-        prompt → generate path but yields a structured 2-tuple stream so an
-        SSE endpoint can paint tokens immediately and still emit a final
-        metadata event:
+        Live-streaming variant that ALSO surfaces citations + confidence --
+        the only streaming path (see the class docstring). Drives the same
+        retrieve → prompt → generate path as run() but yields a structured
+        2-tuple stream so an SSE endpoint can paint tokens immediately and
+        still emit a final metadata event:
 
             ("token", "<text chunk>")   -- repeated, as the model emits them,
                                            with [SOURCE N] markers suppressed

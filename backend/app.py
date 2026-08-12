@@ -229,7 +229,6 @@ class SignupRequest(BaseModel):
 class ChatRequest(BaseModel):
     query: str
     session_id: Optional[str] = None
-    use_agent: bool = False        # set True to route through LangGraph agent
 
 
 class AgentChatRequest(BaseModel):
