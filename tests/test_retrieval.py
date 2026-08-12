@@ -349,8 +349,15 @@ class TestQueryPreprocessor:
     def pp(self):
         return QueryPreprocessor()
 
-    def test_lowercases(self, pp):
-        assert pp.preprocess("ADMISSION PROCESS") == "admission process"
+    def test_preserves_case(self, pp):
+        # Phase 7: casing is no longer destroyed before embedding -- BGE is
+        # cased and the corpus embeddings are built from cased text, so
+        # lowercasing the query widened the query/document distance for
+        # acronyms and proper nouns (MMS, VIT, NAAC) the document side
+        # never lost.
+        assert pp.preprocess("ADMISSION PROCESS") == "ADMISSION PROCESS"
+        assert pp.preprocess("What is the MMS admission process?") == \
+            "What is the MMS admission process?"
 
     def test_strips_whitespace(self, pp):
         assert pp.preprocess("  hello world  ") == "hello world"
@@ -381,6 +388,14 @@ class TestQueryPreprocessor:
     def test_empty_after_strip_returns_empty(self, pp):
         result = pp.preprocess("   ")
         assert result == ""
+
+    def test_runon_typo_split_preserves_case(self, pp):
+        # The split inserts a space into the matched text itself rather
+        # than reconstructing from the (lowercased) term list, so casing
+        # survives regardless of how the typo was capitalized.
+        assert pp.preprocess("theattendance policy") == "the attendance policy"
+        assert pp.preprocess("TheAttendance policy") == "The Attendance policy"
+        assert pp.preprocess("THEMMS process") == "THE MMS process"
 
 
 class TestBuildCitation:

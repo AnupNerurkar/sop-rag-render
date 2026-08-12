@@ -40,6 +40,18 @@ from embeddings.embedder import get_embedder, BATCH_SIZE
 
 logger = logging.getLogger(__name__)
 
+# How much of the previous chunk's tail to prepend as context when building
+# the text actually sent to the embedder. Most chunks have zero overlap
+# with their neighbours: chunker.py keeps SOP sub-process blocks atomic and
+# unsplit up to 1500 chars, so CHUNK_OVERLAP=150 only ever applies inside
+# the (rarer) oversized blocks that get a secondary split. This recovers
+# cross-boundary context for the *vector* -- a step chunk that reads "Then
+# submit the form to the HOD" gets embedded with the end of the previous
+# chunk (which named the form) prepended, without duplicating any text in
+# what's actually stored, cited, or shown to the LLM (payload.content stays
+# the original chunk text; only the embedding input is augmented).
+OVERLAP_TAIL_CHARS = 150
+
 
 # ---------------------------------------------------------------------------
 # Data structures
@@ -55,6 +67,41 @@ class EmbeddingPayload:
     content:   str
     embedding: list[float]
     metadata:  dict
+
+
+def _snap_to_word_boundary(tail: str) -> str:
+    """
+    Drops a leading partial word from a string sliced mid-word (a fixed
+    character-count tail from the end of the previous chunk will usually
+    start partway through a word). Only snaps if the boundary is close by
+    -- a tail with no early space is probably one long token (a URL, a code
+    like "8A-3"), which is left intact rather than truncated further.
+    """
+    sp = tail.find(" ")
+    if 0 <= sp < 30:
+        return tail[sp + 1:]
+    return tail
+
+
+def _build_embedding_text(content: str, section_heading: str, prev_content: Optional[str]) -> str:
+    """
+    Assembles the text actually sent to the embedder: heading + tail of the
+    previous chunk (word-boundary snapped) + this chunk's own content. The
+    first chunk of a document (prev_content is None) gets no overlap --
+    there is nothing before it to pull context from.
+    """
+    parts: list[str] = []
+    heading = (section_heading or "").strip()
+    if heading:
+        parts.append(heading)
+    if prev_content:
+        tail = prev_content.strip()
+        if len(tail) > OVERLAP_TAIL_CHARS:
+            tail = _snap_to_word_boundary(tail[-OVERLAP_TAIL_CHARS:])
+        if tail:
+            parts.append(tail)
+    parts.append(content)
+    return "\n".join(parts)
 
 
 @dataclass
@@ -167,8 +214,25 @@ class EmbedPipeline:
             summary.completed_at = datetime.utcnow().isoformat()
             return [], summary
 
-        # --- Extract texts for batch embedding ---
-        texts = [row["content"] for row in pending_rows]
+        # --- Build embedding texts (heading + prior-chunk tail + content) ---
+        # `pending_rows` is ordered by (doc_id, chunk_index), so the
+        # previous chunk is usually the prior row in this same batch; when
+        # it isn't (e.g. only chunk_index=3 of a document is pending
+        # because 0-2 were already embedded in an earlier run), it's
+        # fetched directly. chunk_index=0 gets no overlap -- there is no
+        # previous chunk in the document.
+        batch_content_by_key = {
+            (row["doc_id"], row["chunk_index"]): row["content"] for row in pending_rows
+        }
+        texts: list[str] = []
+        for row in pending_rows:
+            prev_content = None
+            if row["chunk_index"] > 0:
+                prev_key = (row["doc_id"], row["chunk_index"] - 1)
+                prev_content = batch_content_by_key.get(prev_key)
+                if prev_content is None:
+                    prev_content = ledger.get_chunk_content_by_index(row["doc_id"], row["chunk_index"] - 1)
+            texts.append(_build_embedding_text(row["content"], row.get("section_heading", ""), prev_content))
 
         # --- Embed in batches ---
         try:

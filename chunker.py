@@ -57,13 +57,22 @@ SEPARATORS = ["\n\n", "\n", ". ", " ", ""]
 # Chunk ID generation
 # ---------------------------------------------------------------------------
 
-def _make_chunk_id(doc_id: str, chunk_index: int) -> str:
+def _make_chunk_id(doc_id: str, chunk_index: int, content: str) -> str:
     """
     Generates a deterministic 16-character hex chunk ID.
-    SHA-256(doc_id::chunk_index)[:16]
-    Same document version + same index always produces the same ID.
+    SHA-256(doc_id::chunk_index::content)[:16]
+
+    Content-addressed, not just index-addressed (the previous
+    doc_id::chunk_index scheme): re-ingesting a document whose text changed
+    but whose chunk count didn't previously reused the old chunk_id for
+    different content, silently aliasing an embedding, an FTS5 row, and a
+    citation to text that no longer matches it. Hashing the content makes a
+    changed chunk produce a new id (old row orphaned and cleaned up
+    normally, new row inserted fresh) while an unchanged chunk still
+    produces the same id it always did, so re-ingesting an unchanged
+    document remains a no-op rather than a needless rewrite.
     """
-    raw = f"{doc_id}::{chunk_index}".encode("utf-8")
+    raw = f"{doc_id}::{chunk_index}::{content}".encode("utf-8")
     return hashlib.sha256(raw).hexdigest()[:16]
 
 
@@ -245,7 +254,7 @@ def chunk_document(
             if not sub_text:
                 continue
 
-            chunk_id = _make_chunk_id(doc_record.doc_id, chunk_index)
+            chunk_id = _make_chunk_id(doc_record.doc_id, chunk_index, sub_text)
 
             metadata = ChunkMetadata(
                 doc_id          = doc_record.doc_id,

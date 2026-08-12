@@ -31,6 +31,9 @@ from embeddings.embed_pipeline import (
     EmbedPipeline,
     EmbeddingPayload,
     EmbeddingRunSummary,
+    OVERLAP_TAIL_CHARS,
+    _build_embedding_text,
+    _snap_to_word_boundary,
 )
 
 
@@ -283,3 +286,54 @@ class TestEmbedPipelineIntegration:
         payloads, _ = pipeline.run()
         if payloads:
             assert len(payloads[0].embedding) == 768
+
+
+# ===========================================================================
+# Embedding-time overlap/heading context (Phase 7)
+# ===========================================================================
+
+class TestSnapToWordBoundary:
+    def test_snaps_mid_word_tail(self):
+        # "ubmit the form" -- leading partial word "ubmit" dropped
+        result = _snap_to_word_boundary("ubmit the form")
+        assert result == "the form"
+
+    def test_leaves_tail_with_no_early_space(self):
+        # No space within the first 30 chars -- looks like one long token
+        # (URL, code), left intact rather than truncated further.
+        long_token = "a" * 40
+        assert _snap_to_word_boundary(long_token) == long_token
+
+    def test_already_at_boundary(self):
+        assert _snap_to_word_boundary("the form was submitted") == "form was submitted"
+
+
+class TestBuildEmbeddingText:
+    def test_first_chunk_no_overlap(self):
+        # chunk_index=0 -- prev_content is None, nothing to prepend.
+        text = _build_embedding_text("Submit form ZX-9.", "Admissions", None)
+        assert text == "Admissions\nSubmit form ZX-9."
+
+    def test_no_heading(self):
+        text = _build_embedding_text("Submit form ZX-9.", "", None)
+        assert text == "Submit form ZX-9."
+
+    def test_prepends_short_prev_tail_whole(self):
+        text = _build_embedding_text("Then sign it.", "", "Fill out the form.")
+        assert text == "Fill out the form.\nThen sign it."
+
+    def test_truncates_long_prev_tail(self):
+        # Realistic prose (frequent spaces) rather than one long unbroken
+        # run -- see TestSnapToWordBoundary for the boundary-snapping logic
+        # in isolation, tested directly against index positions.
+        prev = ("lorem ipsum dolor sit amet " * 10) + "end of chunk"
+        text = _build_embedding_text("Next step.", "", prev)
+        assert text.endswith("end of chunk\nNext step.")
+        prepended = text.split("\n")[0]
+        assert len(prepended) <= OVERLAP_TAIL_CHARS
+        assert len(prepended) < len(prev)  # confirms truncation happened
+        assert not prepended.startswith(" ")
+
+    def test_heading_and_overlap_both_present(self):
+        text = _build_embedding_text("Then sign it.", "Admissions", "Fill out the form.")
+        assert text == "Admissions\nFill out the form.\nThen sign it."

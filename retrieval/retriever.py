@@ -89,20 +89,43 @@ _STOPWORDS = frozenset({
 _CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _WHITESPACE_RE   = re.compile(r"\s+")
 
+_RUNON_TERMS = (
+    "attendance", "admission", "scholarship", "examination", "library",
+    "budget", "finance", "academics", "placement", "alumni", "fees",
+    "billing", "mms",
+)
+# Splits a run-on typo ("theattendance") into two words while preserving
+# whatever casing the original text had -- the replacement inserts a space
+# after character 3 of the matched text rather than reconstructing from the
+# (lowercased) term, so "TheAttendance" and "THEATTENDANCE" both come out
+# correctly split with their original letters intact.
+_RUNON_RE = re.compile(r"\bthe(?:" + "|".join(_RUNON_TERMS) + r")\b", re.IGNORECASE)
+
+
+def _split_runon(m: re.Match) -> str:
+    matched = m.group(0)
+    return f"{matched[:3]} {matched[3:]}"
+
 
 class QueryPreprocessor:
     def preprocess(self, text: str, remove_stopwords: bool = False) -> str:
+        # No .lower() here: BGE is a cased model and the corpus embeddings
+        # were built from cased text (Phase 7 re-embed). Lowercasing the
+        # query before embedding destroyed acronyms and proper nouns --
+        # "MMS", "VIT", "NAAC" -- that the document side never lost,
+        # widening the query/document distance for exactly the terms most
+        # useful for keyword-flavored matches. FTS5 (retrieval/fts5.py)
+        # already tokenizes and folds case on both sides independently, so
+        # this doesn't affect keyword search either way.
         text = _CONTROL_CHAR_RE.sub(" ", text)
-        text = _WHITESPACE_RE.sub(" ", text).strip().lower()
+        text = _WHITESPACE_RE.sub(" ", text).strip()
 
-        # Split common run-on typos with 'the' followed by keyword
-        for term in ["attendance", "admission", "scholarship", "examination", "library", "budget", "finance", "academics", "placement", "alumni", "fees", "billing", "mms"]:
-            text = text.replace(f"the{term}", f"the {term}")
+        text = _RUNON_RE.sub(_split_runon, text)
 
         if remove_stopwords:
             tokens = text.split()
             if len(tokens) > 5:
-                tokens = [t for t in tokens if t not in _STOPWORDS]
+                tokens = [t for t in tokens if t.lower() not in _STOPWORDS]
             text = " ".join(tokens) if tokens else text
         return text
 

@@ -7,7 +7,16 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "ingestion_ledger.db"))
+# Env-overridable so a re-chunk/re-embed migration can run against an
+# isolated copy of the database while the live app keeps serving from the
+# real one -- offline verification (both eval harnesses) before a cutover,
+# rather than mutating the live corpus in place with no way back short of
+# a full restore. See scripts/evaluate_retrieval.py, which reads the same
+# variable for the same reason.
+DB_PATH = os.path.abspath(
+    os.environ.get("LEDGER_DB_PATH")
+    or os.path.join(os.path.dirname(__file__), "ingestion_ledger.db")
+)
 
 
 def get_connection():
@@ -531,6 +540,29 @@ def get_chunk_count() -> int:
         cursor.execute("SELECT COUNT(*) FROM chunks")
         count = cursor.fetchone()[0]
         return count
+    finally:
+        conn.close()
+
+
+def get_chunk_content_by_index(doc_id: str, chunk_index: int) -> str | None:
+    """
+    Returns the raw content of one chunk by (doc_id, chunk_index), or None
+    if it doesn't exist. Used to fetch the previous chunk's text for
+    embedding-time overlap context (embeddings/embed_pipeline.py) when that
+    previous chunk isn't in the current embedding batch -- e.g. it was
+    already embedded in an earlier run. Deliberately ignores embedded_at:
+    the previous chunk's *text* is needed regardless of its own embedding
+    status.
+    """
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT content FROM chunks WHERE doc_id = ? AND chunk_index = ?",
+            (doc_id, chunk_index),
+        )
+        row = cursor.fetchone()
+        return row["content"] if row else None
     finally:
         conn.close()
 
