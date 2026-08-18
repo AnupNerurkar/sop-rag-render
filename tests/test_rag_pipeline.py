@@ -704,6 +704,32 @@ class TestSourceMarkerSuppressor:
         out = self._feed_all(sup, ["A [SOURCE 1] and B [SOURCE 2] agree."])
         assert out == "A  and B  agree."
 
+    def test_marker_with_space_after_bracket_suppressed(self):
+        # Caught live on the HP after the openai/gpt-oss-120b model swap:
+        # this model tokenizes the marker as "[ SOURCE 1 ]" (space right
+        # after '['), which _SOURCE_MARKER_RE already tolerates for citation
+        # resolution but the old literal-prefix compare here did not, so the
+        # raw bracket leaked into the live SSE stream while the final answer
+        # still parsed correctly. Must stay suppressed regardless of which
+        # model is configured.
+        sup = _SourceMarkerSuppressor()
+        out = self._feed_all(sup, ["See ", "[ SOURCE", " 1 ]", " for details."])
+        assert out == "See  for details."
+        assert "SOURCE" not in out
+
+    def test_marker_split_with_internal_whitespace_across_tiny_tokens(self):
+        sup = _SourceMarkerSuppressor()
+        tokens = list("Before [ SOURCE 12 ] after")
+        out = self._feed_all(sup, tokens)
+        assert out == "Before  after"
+
+    def test_marker_wrapped_in_markdown_bold_suppressed(self):
+        # Also caught live on the gpt-oss-120b swap: "[**SOURCE 1**]".
+        sup = _SourceMarkerSuppressor()
+        out = self._feed_all(sup, ["See ", "[**SOURCE 1**]", " for details."])
+        assert out == "See  for details."
+        assert "SOURCE" not in out
+
 
 class TestRAGPipelineStreamStructured:
     """

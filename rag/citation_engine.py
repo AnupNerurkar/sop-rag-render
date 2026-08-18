@@ -40,8 +40,17 @@ logger = logging.getLogger(__name__)
 # caught live: a real answer ended with "...late returns
 # [SOURCE 1, SOURCE 2, SOURCE 3]." and that raw text reached the client
 # verbatim, both mid-stream and in the final formatted_answer.
+#
+# The separator between bundled entries is "," for most models but the
+# gpt-oss-120b swap (2026-08-18) showed "[SOURCE 3 ; SOURCE 4]" -- caught
+# live the same way, so the separator itself is tolerant rather than a
+# fixed comma. That same model also sometimes wraps the marker in markdown
+# emphasis -- "[**SOURCE 1**]" -- hence the optional \*{0,2} around each
+# SOURCE/number pair.
 _SOURCE_GROUP_RE = re.compile(
-    r"\[\s*SOURCE\s+\d+(?:\s*,\s*SOURCE\s+\d+)*\s*\]", re.IGNORECASE,
+    r"\[\s*\*{0,2}\s*SOURCE\s+\d+\s*\*{0,2}\s*"
+    r"(?:[,;]\s*\*{0,2}\s*SOURCE\s+\d+\s*\*{0,2}\s*)*\]",
+    re.IGNORECASE,
 )
 _SOURCE_NUM_RE = re.compile(r"\d+")
 

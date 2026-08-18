@@ -62,6 +62,7 @@ LangGraph note:
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Iterator, Optional
 
@@ -129,13 +130,20 @@ class _SourceMarkerSuppressor:
                 break
             out.append(self._pending[:start])
             tail = self._pending[start:]
-            upper_tail = tail.upper()
-            prefix_len = min(len(upper_tail), len(self._PREFIX))
-            if upper_tail[:prefix_len] != self._PREFIX[:prefix_len]:
+            # Compare with internal whitespace and markdown emphasis (*)
+            # stripped -- _SOURCE_MARKER_RE already tolerates "[ SOURCE 1 ]"
+            # and "[**SOURCE 1**]" (gpt-oss on Groq emits both, where
+            # llama-3.3 emitted neither), but a raw literal-prefix compare
+            # here previously rejected both forms on the very first character
+            # after '[', leaking the bracket into the live stream even though
+            # the final answer parsed fine.
+            compact_upper = re.sub(r"[\s*]+", "", tail).upper()
+            prefix_len = min(len(compact_upper), len(self._PREFIX))
+            if compact_upper[:prefix_len] != self._PREFIX[:prefix_len]:
                 out.append(tail[0])
                 self._pending = tail[1:]
                 continue
-            if len(tail) < len(self._PREFIX):
+            if len(compact_upper) < len(self._PREFIX):
                 self._pending = tail
                 break
             close = tail.find("]")

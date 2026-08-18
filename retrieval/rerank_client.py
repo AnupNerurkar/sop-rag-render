@@ -172,7 +172,7 @@ class GroqListwiseReranker:
 
     def _call_groq(self, query: str, pool: "list[RawSearchResult]") -> list[int]:
         api_key = os.environ.get("GROQ_API_KEY", "")
-        model = os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant")
+        model = os.environ.get("GROQ_MODEL", "openai/gpt-oss-20b")
         if not api_key:
             raise RuntimeError("GROQ_API_KEY not set")
 
@@ -186,8 +186,31 @@ class GroqListwiseReranker:
                 {"role": "user", "content": f"Query: {query}\n\nPassages:\n{numbered}"},
             ],
             "temperature": 0,
-            "max_tokens": 200,
-            "response_format": {"type": "json_object"},
+            "max_tokens": 300,
+            # Reasoning models (gpt-oss on Groq) spend part of max_tokens on a
+            # hidden reasoning trace before the JSON body -- "low" keeps that
+            # trace short enough to leave room for the actual answer on a
+            # 20-candidate pool. response_format must be strict json_schema,
+            # not the older json_object: json_object only nudges the shape,
+            # and this model reliably collapses {"ranking":[0,1,2]} into
+            # {"ranking":["012"]} under it. "strict": True is what actually
+            # forces separate integer array elements.
+            "reasoning_effort": "low",
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "reranking",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "ranking": {"type": "array", "items": {"type": "integer"}},
+                        },
+                        "required": ["ranking"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
         }
         headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 

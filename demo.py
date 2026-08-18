@@ -540,7 +540,7 @@ def section_10(s1: dict, s3: dict, s4: dict) -> None:
     _row("Average chunks/document", avg_per_doc)
     _row("Average chunk size",      f"{avg_size:.0f} chars" if avg_size else "N/A")
     _row("Embedding model",         model)
-    _row("LLM model",               f"Groq {os.environ.get('GROQ_MODEL', 'llama-3.1-8b-instant')}")
+    _row("LLM model",               f"Groq {os.environ.get('GROQ_MODEL', 'openai/gpt-oss-20b')}")
     _row("Vector database",         "SQLite (local, brute-force cosine)")
     _row("SQLite ledger size",      _fmt_bytes(db_size))
     _row("Vector store size",         _fmt_bytes(store_size))

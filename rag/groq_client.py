@@ -53,7 +53,7 @@ class GroqConfig(BaseModel):
     """All parameters controlling the Groq API connection."""
 
     api_key:      str   = Field(default=os.environ.get("GROQ_API_KEY", ""))
-    model:        str   = Field(default=os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant"))
+    model:        str   = Field(default=os.environ.get("GROQ_MODEL", "openai/gpt-oss-20b"))
     api_base:     str   = Field(default="https://api.groq.com/openai/v1")
 
     # Generation
@@ -143,34 +143,75 @@ class GroqClient:
             "Content-Type": "application/json"
         }
 
+        # Single retry loop covers both 429 backoff and the 404-model-fallback --
+        # chat_stream previously had neither, unlike _post_json, so a live SSE
+        # request just failed outright on the first transient rate limit or
+        # model blip instead of recovering the way a non-streaming call would.
+        # Safe to loop before yielding: the status code is checked before any
+        # body line is consumed, so no partial output has reached the caller yet.
+        active_payload = payload
         try:
             with httpx.Client(timeout=timeout) as client:
-                with client.stream("POST", url, json=payload, headers=headers) as response:
-                    if response.status_code != 200:
+                for attempt in range(self._cfg.max_retries + 1):
+                    with client.stream("POST", url, json=active_payload, headers=headers) as response:
+                        if response.status_code == 200:
+                            yield from self._iter_stream_lines(response)
+                            return
+
+                        body_text = response.read().decode("utf-8")
+
+                        if response.status_code == 429:
+                            if attempt == self._cfg.max_retries:
+                                raise GroqRateLimitError(
+                                    f"Groq API streaming rate limit exceeded after {self._cfg.max_retries} retries."
+                                )
+                            wait_s = self._parse_retry_after(response) or (self._cfg.retry_delay * (2 ** attempt))
+                            logger.warning(
+                                f"[GROQ] Streaming 429 rate limited, retrying in {wait_s:.1f}s "
+                                f"(attempt {attempt+1}/{self._cfg.max_retries})"
+                            )
+                            time.sleep(wait_s)
+                            continue
+
+                        if (
+                            response.status_code == 404
+                            and "model_not_found" in body_text
+                            and active_payload["model"] != FALLBACK_MODEL
+                        ):
+                            logger.warning(
+                                f"[GROQ] Model '{active_payload['model']}' unavailable (404), "
+                                f"retrying this stream with fallback '{FALLBACK_MODEL}'"
+                            )
+                            active_payload = dict(active_payload, model=FALLBACK_MODEL)
+                            continue
+
                         raise GroqResponseError(
-                            f"Groq API returned status code {response.status_code}: {response.read().decode('utf-8')}"
+                            f"Groq API returned status code {response.status_code}: {body_text}"
                         )
-                    for line in response.iter_lines():
-                        line = line.strip()
-                        if not line or line == "data: [DONE]":
-                            continue
-                        if line.startswith("data: "):
-                            line = line[len("data: "):]
-                        try:
-                            obj = json.loads(line)
-                            choices = obj.get("choices", [])
-                            if not choices:
-                                continue
-                            delta = choices[0].get("delta", {})
-                            text = delta.get("content", "")
-                            if text:
-                                yield text
-                        except (json.JSONDecodeError, KeyError, IndexError):
-                            continue
         except httpx.ConnectError as exc:
             raise GroqConnectionError(f"Cannot connect to Groq API endpoint.") from exc
         except httpx.TimeoutException as exc:
             raise GroqTimeoutError(f"Groq streaming timed out after {self._cfg.timeout}s.") from exc
+
+    @staticmethod
+    def _iter_stream_lines(response: "httpx.Response") -> Iterator[str]:
+        for line in response.iter_lines():
+            line = line.strip()
+            if not line or line == "data: [DONE]":
+                continue
+            if line.startswith("data: "):
+                line = line[len("data: "):]
+            try:
+                obj = json.loads(line)
+                choices = obj.get("choices", [])
+                if not choices:
+                    continue
+                delta = choices[0].get("delta", {})
+                text = delta.get("content", "")
+                if text:
+                    yield text
+            except (json.JSONDecodeError, KeyError, IndexError):
+                continue
 
     def health_check(self) -> bool:
         """Returns True if the API is configured and responds to a simple check."""
@@ -236,6 +277,19 @@ class GroqClient:
                         logger.warning(f"[GROQ] 429 rate limited, retrying in {wait_s:.1f}s (attempt {attempt+1}/{self._cfg.max_retries})")
                         time.sleep(wait_s)
                         continue
+                    if response.status_code == 404 and payload["model"] != FALLBACK_MODEL and "model_not_found" in response.text:
+                        logger.warning(
+                            f"[GROQ] Model '{payload['model']}' unavailable (404), "
+                            f"retrying this request with fallback '{FALLBACK_MODEL}'"
+                        )
+                        fallback_payload = dict(payload, model=FALLBACK_MODEL)
+                        fb_response = client.post(url, json=fallback_payload, headers=headers)
+                        if fb_response.status_code != 200:
+                            raise GroqResponseError(
+                                f"Groq API returned status code {fb_response.status_code} "
+                                f"(fallback model also failed): {fb_response.text}"
+                            )
+                        return fb_response.json()
                     if response.status_code != 200:
                         raise GroqResponseError(
                             f"Groq API returned status code {response.status_code}: {response.text}"
@@ -290,7 +344,10 @@ class GroqClient:
             "completion_tokens": c_tokens,
             "finish_reason": finish_reason,
             # generation_time_ms is set by chat() right after this returns.
-            "model_name": self._cfg.model,
+            # Read the echoed "model" field rather than self._cfg.model -- a
+            # 404 fallback in _post_json may have served this from a
+            # different model than the one configured.
+            "model_name": body.get("model", self._cfg.model),
         }
 
 
@@ -311,7 +368,7 @@ def get_groq_client(config: Optional[GroqConfig] = None) -> GroqClient:
 # Startup model resolution
 # ---------------------------------------------------------------------------
 
-FALLBACK_MODEL = "llama-3.1-8b-instant"
+FALLBACK_MODEL = "openai/gpt-oss-20b"
 
 
 def resolve_active_model() -> dict:

@@ -216,6 +216,22 @@ class TestInjectInlineRefs:
         result = _inject_inline_refs(answer, {1: 1})
         assert result == " confirm this."
 
+    def test_bundled_marker_semicolon_separator_resolved(self):
+        # Caught live after the gpt-oss-120b model swap (2026-08-18): this
+        # model sometimes bundles with "; " instead of ", " -- e.g.
+        # "[SOURCE 3 ; SOURCE 4]". The comma-only separator missed this
+        # entirely, so the marker leaked raw into both the streamed and
+        # final answer text instead of resolving.
+        answer = "confirmed here [SOURCE 3 ; SOURCE 4]."
+        result = _inject_inline_refs(answer, {3: 1, 4: 2})
+        assert result == "confirmed here [1, 2]."
+
+    def test_marker_wrapped_in_markdown_bold_resolved(self):
+        # Also caught live after the gpt-oss-120b swap: "[**SOURCE 1**]".
+        answer = "confirmed here [**SOURCE 1**]."
+        result = _inject_inline_refs(answer, {1: 1})
+        assert result == "confirmed here [1]."
+
 
 # ===========================================================================
 # _extract_display_name
