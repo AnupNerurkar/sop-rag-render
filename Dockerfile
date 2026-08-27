@@ -33,20 +33,24 @@ COPY . .
 # Create persistent directories
 RUN mkdir -p data/staging vector_store/chroma_db
 
-# Bake seed_documents/ into the image as an already-embedded corpus. This
-# service (Render free plan) has no persistent disk, so a fresh container
-# after every spin-down starts from this image layer, not from whatever
-# was uploaded at runtime -- baking it in at build time is the only way
-# the corpus survives that reset. Uses BuildKit secret mounts (Render
-# injects env vars as plain build ARGs otherwise, which would leave the
-# keys sitting in image layers -- see Render's own Docker-secrets docs)
-# so GROQ_API_KEY/HF_API_TOKEN never land in the final image.
-RUN --mount=type=secret,id=groq_api_key \
-    --mount=type=secret,id=hf_api_token \
-    GROQ_API_KEY="$(cat /run/secrets/groq_api_key)" \
-    HF_API_TOKEN="$(cat /run/secrets/hf_api_token)" \
-    LLM_BACKEND=groq \
-    python scripts/bake_corpus.py
+# Bake the pre-embedded corpus into the image. This service (Render free
+# plan) has no persistent disk, so a fresh container after every spin-down
+# starts from this image layer, not from anything uploaded at runtime --
+# the corpus has to be part of the image or the app comes up empty.
+#
+# seed_ledger.db already contains all 18 documents chunked AND embedded
+# (built offline, see scripts/bake_corpus.py for how it was produced).
+# Shipping the finished DB rather than embedding during `docker build`
+# avoids needing HF/Groq credentials at build time and avoids ~600
+# embedding API calls on every deploy -- the earlier build-time approach
+# silently shipped 0 vectors whenever the build secret wasn't present,
+# which is exactly the "no answers" failure that motivated this switch.
+# ingestion_ledger.db holds only documents/chunks/embeddings; user
+# accounts live in a separate institutional.db, so nothing here exposes
+# credentials. source_file paths in the DB point at data/staging/<name>,
+# so the seed files are copied there too for the document viewer.
+COPY seed_ledger.db /app/ingestion_ledger.db
+RUN cp seed_documents/* data/staging/
 
 # Expose FastAPI port
 EXPOSE 8000

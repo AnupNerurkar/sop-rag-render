@@ -5,21 +5,18 @@ services:
     dockerfilePath: ./Dockerfile
     # Free plan: no persistent disk (Render only attaches one from Starter
     # up), and a free web service also spins down after 15 minutes idle,
-    # coming back as a brand-new container. The seed_documents/ corpus is
-    # baked into the image at build time (see Dockerfile, scripts/bake_
-    # corpus.py) specifically because of this -- it survives spin-down
-    # since it's part of the image, not the writable layer. Anything
-    # uploaded or deleted at *runtime* through the app, on top of that
-    # baked-in corpus, still does NOT survive a spin-down or redeploy --
-    # that part would need a real external database (e.g. Neon Postgres,
-    # which this project used before the move to local SQLite) to fix.
+    # coming back as a brand-new container. The pre-embedded corpus
+    # (seed_ledger.db) is baked into the image (see Dockerfile) so it
+    # survives spin-down -- it's part of the image, not the writable
+    # layer. Anything uploaded or deleted at *runtime* on top of that
+    # baked-in corpus still does NOT survive a spin-down or redeploy --
+    # that would need a real external database (e.g. Neon Postgres, which
+    # this project used before the move to local SQLite) to fix.
+    #
+    # No build-time secrets needed: the corpus is shipped already embedded,
+    # so GROQ_API_KEY / HF_API_TOKEN are only read at runtime (below), for
+    # embedding the user's query and generating answers.
     plan: free
-    # Required before the first deploy: add two Secret Files in the Render
-    # dashboard (Environment -> Secret Files), named exactly "groq_api_key"
-    # and "hf_api_token", containing just the raw key value each. The
-    # Dockerfile mounts them by that name to embed the seed corpus at
-    # build time; without them the build step fails outright rather than
-    # silently shipping an empty corpus.
     envVars:
       - key: LLM_BACKEND
         value: groq
