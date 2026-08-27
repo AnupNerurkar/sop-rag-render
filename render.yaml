@@ -5,17 +5,21 @@ services:
     dockerfilePath: ./Dockerfile
     # Free plan: no persistent disk (Render only attaches one from Starter
     # up), and a free web service also spins down after 15 minutes idle,
-    # coming back as a brand-new container. SQLite holds documents, chunks,
-    # embeddings, and the FTS5 index all in one file, plus uploads land in
-    # data/staging/ (see ledger.py, document_manager.py) -- both are on the
-    # container's local disk, so anything uploaded or deleted during a
-    # session does NOT survive the next spin-down or redeploy. That's an
-    # architecture constraint of running SQLite without a disk, not
-    # something a config change here can fix -- moving to a free external
-    # database (e.g. Neon Postgres, which this project used before the
-    # move to local SQLite) is the real fix if persistence is needed on
-    # the free plan; ask before doing that migration, it's a real rewrite.
+    # coming back as a brand-new container. The seed_documents/ corpus is
+    # baked into the image at build time (see Dockerfile, scripts/bake_
+    # corpus.py) specifically because of this -- it survives spin-down
+    # since it's part of the image, not the writable layer. Anything
+    # uploaded or deleted at *runtime* through the app, on top of that
+    # baked-in corpus, still does NOT survive a spin-down or redeploy --
+    # that part would need a real external database (e.g. Neon Postgres,
+    # which this project used before the move to local SQLite) to fix.
     plan: free
+    # Required before the first deploy: add two Secret Files in the Render
+    # dashboard (Environment -> Secret Files), named exactly "groq_api_key"
+    # and "hf_api_token", containing just the raw key value each. The
+    # Dockerfile mounts them by that name to embed the seed corpus at
+    # build time; without them the build step fails outright rather than
+    # silently shipping an empty corpus.
     envVars:
       - key: LLM_BACKEND
         value: groq
