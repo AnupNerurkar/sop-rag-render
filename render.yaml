@@ -1,0 +1,35 @@
+services:
+  - type: web
+    name: sop-rag-render
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    envVars:
+      - key: LLM_BACKEND
+        value: groq
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        value: openai/gpt-oss-120b
+      - key: HF_API_TOKEN
+        sync: false
+      - key: JWT_SECRET_KEY
+        generateValue: true
+      # SQLite holds documents, chunks, embeddings, and the FTS5 keyword
+      # index all in one file (see ledger.py). Render's container
+      # filesystem is wiped on every deploy and restart, so without the
+      # disk below every uploaded/embedded document is lost the next time
+      # this service redeploys. The "starter" plan above is required for
+      # a persistent disk -- Render's free instance type cannot attach one.
+      #
+      # Mounted at /app/data rather than a separate path: document_manager
+      # writes uploaded originals to data/staging/ (STAGING_DIR is hardcoded
+      # relative to the app root, not env-overridable), so putting the disk
+      # there keeps the ledger DB and the staged files on the same volume
+      # instead of only persisting the DB while losing the staged originals.
+      - key: LEDGER_DB_PATH
+        value: /app/data/ingestion_ledger.db
+    disk:
+      name: sop-rag-data
+      mountPath: /app/data
+      sizeGB: 1

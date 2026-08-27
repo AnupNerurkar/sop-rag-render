@@ -35,4 +35,7 @@ RUN mkdir -p data/staging vector_store/chroma_db
 # Expose FastAPI port
 EXPOSE 8000
 
-CMD ["uvicorn", "backend.app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+# Render (and most PaaS Docker runtimes) inject PORT and expect the
+# container to bind to it; shell form so ${PORT} actually expands. Falls
+# back to 8000 for plain `docker run`/local use where PORT isn't set.
+CMD ["sh", "-c", "uvicorn backend.app:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1"]
