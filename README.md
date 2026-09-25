@@ -207,15 +207,3 @@ Human relevance labels to settle the reranking question; a larger double-annotat
 ## Data availability
 
 The SOP corpus (Vidyalankar Institute of Technology, Mumbai) consists of confidential internal records of the institution and is not released as a dataset with the paper. Any documents bundled with the hosted demo remain the institution's property and are not licensed for reuse. The pipeline does not depend on this college: any institution can reproduce the setup by ingesting its own SOPs. Survey responses were anonymous and are reported only in aggregate.
-
-## Citation
-
-```bibtex
-@misc{nerurkar2026edumind,
-  author       = {Nerurkar, Anup and Thakar, Jaynish and Malekar, Aditya and Alwala, Nipun and Panchal, Prithvi},
-  title        = {EduMind (sop-rag-render): Source code},
-  year         = {2026},
-  howpublished = {GitHub repository},
-  url          = {https://github.com/AnupNerurkar/sop-rag-render}
-}
-```
